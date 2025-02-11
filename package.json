@@ -1,0 +1,26 @@
+{
+  "name": "nifya-notification-worker",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Cloud Run service for processing notifications from various content processors",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "vitest",
+    "lint": "eslint src/**/*.js",
+    "format": "prettier --write src/**/*.js"
+  },
+  "dependencies": {
+    "@google-cloud/pubsub": "^4.0.7",
+    "@google-cloud/secret-manager": "^5.0.0",
+    "pg": "^8.11.3",
+    "pino": "^8.17.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "eslint": "^8.56.0",
+    "prettier": "^3.2.4",
+    "vitest": "^1.2.1"
+  }
+}
