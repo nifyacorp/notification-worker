@@ -15,6 +15,9 @@ COPY src/ ./src/
 
 # Set environment variables
 ENV NODE_ENV=production
+ENV PUBSUB_SUBSCRIPTION=notification-processor
+ENV DLQ_TOPIC=notification-dlq
+ENV LOG_LEVEL=info
 
 # Start the service
 CMD [ "npm", "start" ]
