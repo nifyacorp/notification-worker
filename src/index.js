@@ -3,9 +3,21 @@ import { validateMessage } from './utils/validation.js';
 import { processBOEMessage } from './processors/boe.js';
 import { processRealEstateMessage } from './processors/real-estate.js';
 import { logger } from './utils/logger.js';
+import http from 'http';
 
 const pubsub = new PubSub({
   projectId: process.env.GOOGLE_CLOUD_PROJECT,
+});
+
+// Create HTTP server for Cloud Run health checks
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('OK');
+});
+
+const port = process.env.PORT || 8080;
+server.listen(port, () => {
+  logger.info(`HTTP server listening on port ${port}`);
 });
 
 const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION);
@@ -75,10 +87,12 @@ subscription.on('error', (error) => {
 process.on('SIGTERM', async () => {
   logger.info('Received SIGTERM signal, shutting down gracefully');
   subscription.close();
+  server.close();
   process.exit(0);
 });
 
 logger.info('Notification worker started', {
   subscription: process.env.PUBSUB_SUBSCRIPTION,
-  project: process.env.GOOGLE_CLOUD_PROJECT
+  project: process.env.GOOGLE_CLOUD_PROJECT,
+  port: port
 });

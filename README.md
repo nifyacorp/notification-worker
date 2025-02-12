@@ -1,6 +1,6 @@
 # Nifya Notification Worker
 
-A Cloud Run service that processes notifications from various content processors (BOE, Real Estate, etc.) and creates user notifications in the database.
+A Cloud Run service that processes notifications from various content processors (BOE, Real Estate, etc.) and creates user notifications in the database. This service listens to a PubSub subscription and processes incoming messages to generate user notifications based on document matches.
 
 ## 🚀 Features
 
@@ -12,13 +12,17 @@ A Cloud Run service that processes notifications from various content processors
 - Message validation using Zod
 
 ## 🛠 Tech Stack
-
 - **Runtime**: Node.js 20
 - **Database**: PostgreSQL (shared with main service)
 - **Cloud Services**:
   - Cloud Run (service hosting)
   - Cloud Pub/Sub (message processing)
   - Cloud SQL (PostgreSQL hosting)
+- **Libraries**:
+  - `@google-cloud/pubsub` - PubSub client
+  - `pg` - PostgreSQL client
+  - `pino` - Structured logging
+  - `zod` - Schema validation
 - **Libraries**:
   - `@google-cloud/pubsub` - PubSub client
   - `pg` - PostgreSQL client
@@ -33,6 +37,9 @@ A Cloud Run service that processes notifications from various content processors
   - Cloud SQL configured
 - Node.js 20+
 - Docker (for local development)
+- Service account with necessary permissions:
+  - `roles/pubsub.subscriber`
+  - `roles/cloudsql.client`
 
 ## 🏃‍♂️ Local Development
 
@@ -41,6 +48,7 @@ A Cloud Run service that processes notifications from various content processors
 npm install
 ```
 
+2. Copy `.env.example` to `.env` and configure your environment variables:
 2. Set up environment variables:
 ```bash
 # Database Configuration
@@ -56,6 +64,8 @@ export INSTANCE_CONNECTION_NAME=your-instance-connection
 export PUBSUB_SUBSCRIPTION=notification-processor
 export DLQ_TOPIC=notification-dlq
 ```
+
+3. Start the service:
 
 3. Start the service:
 ```bash
@@ -86,6 +96,7 @@ Build the container:
 docker build -t notification-worker .
 ```
 
+
 Run locally:
 ```bash
 docker run -p 8080:8080 \
@@ -93,7 +104,7 @@ docker run -p 8080:8080 \
   notification-worker
 ```
 
-## 🚀 Deployment
+## 🚀 Cloud Run Deployment
 
 Deploy to Cloud Run:
 
@@ -107,7 +118,13 @@ gcloud run deploy notification-worker \
   --platform managed \
   --region us-central1 \
   --service-account notification-worker@PROJECT_ID.iam.gserviceaccount.com \
-  --set-env-vars "PUBSUB_SUBSCRIPTION=notification-processor"
+  --set-env-vars "PUBSUB_SUBSCRIPTION=notification-processor,DLQ_TOPIC=notification-dlq" \
+  --set-secrets "DB_PASSWORD=projects/PROJECT_NUMBER/secrets/notification-worker-db-password/versions/latest" \
+  --add-cloudsql-instances PROJECT_ID:REGION:INSTANCE_NAME
+
+# Verify deployment
+gcloud run services describe notification-worker \
+  --platform managed --region us-central1
 ```
 
 ## 📊 Monitoring
@@ -118,6 +135,7 @@ Key metrics to monitor:
 - Database operation latency
 - Error rate by type
 - DLQ message count
+- Cloud Run instance count and CPU/Memory usage
 
 ## 🐛 Troubleshooting
 
@@ -126,6 +144,7 @@ Common issues and solutions:
 1. Message Processing Failures
    - Check message format against schema
    - Verify database connection
+   - Ensure Cloud SQL proxy is working
    - Review error logs
 
 2. Database Connection Issues
@@ -137,6 +156,12 @@ Common issues and solutions:
    - Verify subscription exists
    - Check IAM roles
    - Review message retention
+   - Verify service account permissions
+
+4. Cloud Run Issues
+   - Check instance logs
+   - Verify memory/CPU limits
+   - Check service account permissions
 
 ## 📁 Project Structure
 
@@ -159,5 +184,3 @@ Common issues and solutions:
 ```
 
 ## 📄 License
-
-Private and confidential. All rights reserved.
