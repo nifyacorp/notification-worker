@@ -9,6 +9,7 @@ import { db } from './database/client.js';
 // Initialize PubSub client
 const pubsub = new PubSub({
   projectId: process.env.GOOGLE_CLOUD_PROJECT,
+  maxMessages: 1, // Process one message at a time for better debugging
 });
 
 // Initialize subscription and DLQ topic
@@ -54,8 +55,38 @@ async function publishToDLQ(message, error) {
 }
 
 async function processMessage(message) {
+  let data;
   try {
-    const data = JSON.parse(message.data.toString());
+    const rawMessage = message.data.toString();
+    logger.debug('Received PubSub message', {
+      messageId: message.id,
+      publishTime: message.publishTime,
+      attributes: message.attributes,
+      raw_data: rawMessage,
+      data_length: rawMessage.length,
+      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME
+    });
+
+    try {
+      data = JSON.parse(rawMessage);
+    } catch (parseError) {
+      logger.error('Failed to parse message JSON', {
+        error: parseError.message,
+        raw_data: rawMessage,
+        message_id: message.id
+      });
+      throw parseError;
+    }
+    
+    logger.debug('Parsed message data', {
+      message_id: message.id,
+      processor_type: data.processor_type,
+      trace_id: data.trace_id,
+      timestamp: data.timestamp,
+      request: data.request,
+      metadata: data.metadata
+    });
+    
     const validatedData = validateMessage(data);
     
     const processor = PROCESSOR_MAP[validatedData.processor_type];
@@ -73,10 +104,16 @@ async function processMessage(message) {
   } catch (error) {
     logger.error('Failed to process message', {
       error,
-      trace_id: data?.trace_id
+      error_stack: error.stack,
+      error_name: error.name,
+      trace_id: data?.trace_id,
+      raw_message: rawMessage,
+      message_id: message.id,
+      publish_time: message.publishTime,
+      processor_type: data?.processor_type
     });
 
-    await publishToDLQ(data, error);
+    await publishToDLQ(data || { raw_message: message.data.toString() }, error);
     message.nack();
   }
 }
@@ -86,9 +123,10 @@ subscription.on('message', processMessage);
 subscription.on('error', (error) => {
   logger.error('Subscription error', {
     error: error.message,
+    stack: error.stack,
     code: error.code,
     details: error.details,
-    subscription: process.env.PUBSUB_SUBSCRIPTION,
+    subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
     project: process.env.GOOGLE_CLOUD_PROJECT
   });
 });
