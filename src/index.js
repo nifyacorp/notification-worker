@@ -6,37 +6,14 @@ import { logger } from './utils/logger.js';
 import http from 'http';
 import { db } from './database/client.js';
 
-// Debug PubSub client creation
-async function createPubSubClient() {
-  try {
-    logger.info('Creating PubSub client', {
-      project: process.env.GOOGLE_CLOUD_PROJECT,
-      credentials: process.env.GOOGLE_APPLICATION_CREDENTIALS || 'Using default credentials'
-    });
-    
-    const pubsub = new PubSub({
-      projectId: process.env.GOOGLE_CLOUD_PROJECT,
-    });
-    
-    // Test the client by listing topics
-    const [topics] = await pubsub.getTopics();
-    logger.info('PubSub client created successfully', {
-      topicsCount: topics.length
-    });
-    
-    return pubsub;
-  } catch (error) {
-    logger.error('Failed to create PubSub client', {
-      error: error.message,
-      code: error.code,
-      details: error.details,
-      stack: error.stack
-    });
-    throw error;
-  }
-}
+// Initialize PubSub client
+const pubsub = new PubSub({
+  projectId: process.env.GOOGLE_CLOUD_PROJECT,
+});
 
-let pubsub;
+// Initialize subscription and DLQ topic
+const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION_NAME);
+const dlqTopic = pubsub.topic(process.env.PUBSUB_DLQ_TOPIC_NAME);
 
 // Create HTTP server for Cloud Run health checks
 const server = http.createServer((req, res) => {
@@ -48,9 +25,6 @@ const port = process.env.PORT || 8080;
 server.listen(port, () => {
   logger.info(`HTTP server listening on port ${port}`);
 });
-
-let subscription;
-let dlqTopic;
 
 const PROCESSOR_MAP = {
   'boe': processBOEMessage,
@@ -130,13 +104,6 @@ async function initializeServices() {
         NODE_ENV: process.env.NODE_ENV
       }
     });
-    
-    // Initialize PubSub first
-    pubsub = await createPubSubClient();
-    
-    // Initialize subscription and DLQ topic
-    subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION_NAME);
-    dlqTopic = pubsub.topic(process.env.PUBSUB_DLQ_TOPIC_NAME);
     
     // Test database connection
     logger.info('Testing database connection');
