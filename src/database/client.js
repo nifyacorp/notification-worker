@@ -4,12 +4,10 @@ import { logger } from '../utils/logger.js';
 const { Pool } = pg;
 
 const config = {
-  // Required connection config
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   host: `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}`,
-  // Pool config
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
