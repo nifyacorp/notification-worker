@@ -24,12 +24,12 @@ server.listen(port, () => {
   logger.info(`HTTP server listening on port ${port}`);
 });
 
-const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION);
-const dlqTopic = pubsub.topic(process.env.DLQ_TOPIC);
+const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION_NAME);
+const dlqTopic = pubsub.topic(process.env.PUBSUB_DLQ_TOPIC_NAME);
 
 logger.info('PubSub configuration', {
-  subscription: process.env.PUBSUB_SUBSCRIPTION,
-  dlq_topic: process.env.DLQ_TOPIC
+  subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+  dlq_topic: process.env.PUBSUB_DLQ_TOPIC_NAME
 });
 
 const PROCESSOR_MAP = {
@@ -108,10 +108,10 @@ async function initializeServices() {
     // Test PubSub subscription existence
     const [exists] = await subscription.exists();
     if (!exists) {
-      throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
+      throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION_NAME}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
     }
     logger.info('PubSub subscription verified', {
-      subscription: process.env.PUBSUB_SUBSCRIPTION,
+      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
     
@@ -121,7 +121,7 @@ async function initializeServices() {
       error: error.message,
       code: error.code,
       component: error.message.includes('PubSub') ? 'pubsub' : 'database',
-      subscription: process.env.PUBSUB_SUBSCRIPTION,
+      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
     throw error;
@@ -140,7 +140,7 @@ try {
   await initializeServices();
   
   logger.info('Notification worker started successfully', {
-    subscription: process.env.PUBSUB_SUBSCRIPTION,
+    subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
     project: process.env.GOOGLE_CLOUD_PROJECT,
     port: port
   });

@@ -15,8 +15,8 @@ COPY src/ ./src/
 
 # Set environment variables
 ENV NODE_ENV=production
-ENV PUBSUB_SUBSCRIPTION=notification-processor
-ENV DLQ_TOPIC=notification-dlq
+ENV PUBSUB_SUBSCRIPTION_NAME=notification-processor
+ENV PUBSUB_DLQ_TOPIC_NAME=notification-dlq
 ENV LOG_LEVEL=info
 
 # Start the service
