@@ -13,6 +13,18 @@ const config = {
   connectionTimeoutMillis: 10000,
 };
 
+logger.info('Initializing database connection pool', {
+  config: {
+    user: config.user,
+    database: config.database,
+    host: config.host,
+    max: config.max,
+    idleTimeoutMillis: config.idleTimeoutMillis,
+    connectionTimeoutMillis: config.connectionTimeoutMillis,
+    instance_connection_name: process.env.INSTANCE_CONNECTION_NAME
+  }
+});
+
 const pool = new Pool(config);
 
 pool.on('error', (err) => {
@@ -27,26 +39,45 @@ pool.on('error', (err) => {
 async function testConnection() {
   let client;
   try {
+    logger.info('Attempting to acquire database connection');
     client = await pool.connect();
+    logger.info('Successfully acquired database connection, executing test query');
+    
     const result = await client.query('SELECT NOW()');
     logger.info('Connected to database', {
       timestamp: result.rows[0].now
     });
     return result;
   } catch (err) {
+    const isConnectionError = ['ECONNREFUSED', 'ETIMEDOUT', '28P01', '3D000'].includes(err.code);
     logger.error('Database connection failed', {
       error: err.message,
       stack: err.stack,
       code: err.code,
+      sqlState: err.sqlState,
+      detail: err.detail,
+      hint: err.hint,
+      position: err.position,
+      internalPosition: err.internalPosition,
+      internalQuery: err.internalQuery,
+      where: err.where,
+      schema: err.schema,
+      table: err.table,
+      column: err.column,
+      dataType: err.dataType,
+      constraint: err.constraint,
+      errorType: isConnectionError ? 'connection' : 'query',
       config: {
         user: config.user,
         database: config.database,
-        host: config.host
+        host: config.host,
+        instance_connection_name: process.env.INSTANCE_CONNECTION_NAME
       }
     });
     throw err;
   } finally {
     if (client) {
+      logger.info('Releasing database connection');
       client.release();
     }
   }
