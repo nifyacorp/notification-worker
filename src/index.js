@@ -9,12 +9,12 @@ import { db } from './database/client.js';
 // Initialize PubSub client
 const pubsub = new PubSub({
   projectId: process.env.GOOGLE_CLOUD_PROJECT,
-  maxMessages: 1, // Process one message at a time for better debugging
+  maxMessages: 1 // Process one message at a time for better debugging
 });
 
 // Initialize subscription and DLQ topic
-const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION_NAME);
-const dlqTopic = pubsub.topic(process.env.PUBSUB_DLQ_TOPIC_NAME);
+const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION);
+const dlqTopic = pubsub.topic(process.env.DLQ_TOPIC);
 
 // Create HTTP server for Cloud Run health checks
 const server = http.createServer((req, res) => {
@@ -64,7 +64,7 @@ async function processMessage(message) {
       attributes: message.attributes,
       raw_data: rawMessage,
       data_length: rawMessage.length,
-      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME
+      subscription: process.env.PUBSUB_SUBSCRIPTION
     });
 
     try {
@@ -126,7 +126,7 @@ subscription.on('error', (error) => {
     stack: error.stack,
     code: error.code,
     details: error.details,
-    subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+    subscription: process.env.PUBSUB_SUBSCRIPTION,
     project: process.env.GOOGLE_CLOUD_PROJECT
   });
 });
@@ -137,8 +137,8 @@ async function initializeServices() {
     logger.info('Starting service initialization', {
       env: {
         GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
-        PUBSUB_SUBSCRIPTION_NAME: process.env.PUBSUB_SUBSCRIPTION_NAME,
-        PUBSUB_DLQ_TOPIC_NAME: process.env.PUBSUB_DLQ_TOPIC_NAME,
+        PUBSUB_SUBSCRIPTION: process.env.PUBSUB_SUBSCRIPTION,
+        DLQ_TOPIC: process.env.DLQ_TOPIC,
         NODE_ENV: process.env.NODE_ENV
       }
     });
@@ -150,17 +150,17 @@ async function initializeServices() {
     
     // Test PubSub subscription existence
     logger.info('Testing PubSub subscription existence', {
-      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+      subscription: process.env.PUBSUB_SUBSCRIPTION,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
     
     const [exists] = await subscription.exists();
     if (!exists) {
-      throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION_NAME}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
+      throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
     }
     
     logger.info('PubSub subscription verified', {
-      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+      subscription: process.env.PUBSUB_SUBSCRIPTION,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
     
@@ -171,7 +171,7 @@ async function initializeServices() {
       code: error.code,
       stack: error.stack,
       component: error.message?.includes('PubSub') ? 'pubsub' : 'database',
-      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+      subscription: process.env.PUBSUB_SUBSCRIPTION,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
     throw error;
@@ -191,7 +191,7 @@ try {
   
   logger.info('Notification worker started successfully', {
     config: {
-      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+      subscription: process.env.PUBSUB_SUBSCRIPTION,
       project: process.env.GOOGLE_CLOUD_PROJECT,
       port: port
     }

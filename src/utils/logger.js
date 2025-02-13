@@ -10,4 +10,12 @@ export const logger = pino({
   base: {
     service: 'notification-worker',
   },
+  transport: {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+      translateTime: 'SYS:standard',
+      ignore: 'pid,hostname'
+    }
+  }
 });

@@ -3,22 +3,31 @@ import { logger } from '../utils/logger.js';
 
 const { Pool } = pg;
 
+// Ensure required environment variables are present
+const requiredEnvVars = ['DB_PASSWORD', 'INSTANCE_CONNECTION_NAME'];
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    throw new Error(`Missing required environment variable: ${envVar}`);
+  }
+}
+
 const config = {
-  user: process.env.DB_USER,
+  user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  host: process.env.INSTANCE_CONNECTION_NAME ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : 'localhost',
+  database: process.env.DB_NAME || 'nifya',
+  host: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : 'localhost',
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-  ssl: false
+  ssl: process.env.NODE_ENV === 'production'
 };
 
 logger.info('Environment variables for database connection', {
   DB_USER: process.env.DB_USER || 'not set',
   DB_NAME: process.env.DB_NAME || 'not set',
   INSTANCE_CONNECTION_NAME: process.env.INSTANCE_CONNECTION_NAME || 'not set',
-  NODE_ENV: process.env.NODE_ENV || 'not set'
+  NODE_ENV: process.env.NODE_ENV || 'not set',
+  socket_path: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : 'not using socket'
 });
 
 logger.info('Initializing database connection pool', {
@@ -29,6 +38,7 @@ logger.info('Initializing database connection pool', {
     max: config.max,
     idleTimeoutMillis: config.idleTimeoutMillis,
     connectionTimeoutMillis: config.connectionTimeoutMillis,
+    ssl: config.ssl,
     instance_connection_name: process.env.INSTANCE_CONNECTION_NAME,
     socket_path: process.env.INSTANCE_CONNECTION_NAME ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : null,
     is_production: process.env.NODE_ENV === 'production'
