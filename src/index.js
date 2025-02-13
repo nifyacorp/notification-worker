@@ -4,9 +4,15 @@ import { processBOEMessage } from './processors/boe.js';
 import { processRealEstateMessage } from './processors/real-estate.js';
 import { logger } from './utils/logger.js';
 import http from 'http';
+import { db } from './database/client.js';
 
 logger.info('Initializing PubSub client', {
-  project: process.env.GOOGLE_CLOUD_PROJECT
+  project: process.env.GOOGLE_CLOUD_PROJECT,
+  env_vars: {
+    GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
+    PUBSUB_SUBSCRIPTION_NAME: process.env.PUBSUB_SUBSCRIPTION_NAME,
+    PUBSUB_DLQ_TOPIC_NAME: process.env.PUBSUB_DLQ_TOPIC_NAME
+  }
 });
 
 const pubsub = new PubSub({
@@ -102,14 +108,24 @@ subscription.on('error', (error) => {
 // Initialize all services
 async function initializeServices() {
   try {
+    logger.info('Starting service initialization');
+    
     // Test database connection
+    logger.info('Testing database connection');
     await db.testConnection();
+    logger.info('Database connection successful');
     
     // Test PubSub subscription existence
+    logger.info('Testing PubSub subscription existence', {
+      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+      project: process.env.GOOGLE_CLOUD_PROJECT
+    });
+    
     const [exists] = await subscription.exists();
     if (!exists) {
       throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION_NAME}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
     }
+    
     logger.info('PubSub subscription verified', {
       subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
       project: process.env.GOOGLE_CLOUD_PROJECT
@@ -120,7 +136,8 @@ async function initializeServices() {
     logger.error('Service initialization failed', {
       error: error.message,
       code: error.code,
-      component: error.message.includes('PubSub') ? 'pubsub' : 'database',
+      stack: error.stack,
+      component: error.message?.includes('PubSub') ? 'pubsub' : 'database',
       subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
@@ -140,11 +157,17 @@ try {
   await initializeServices();
   
   logger.info('Notification worker started successfully', {
-    subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
-    project: process.env.GOOGLE_CLOUD_PROJECT,
-    port: port
+    config: {
+      subscription: process.env.PUBSUB_SUBSCRIPTION_NAME,
+      project: process.env.GOOGLE_CLOUD_PROJECT,
+      port: port
+    }
   });
 } catch (error) {
-  logger.error('Failed to start notification worker', { error });
+  logger.error('Failed to start notification worker', {
+    error: error.message,
+    stack: error.stack,
+    code: error.code
+  });
   process.exit(1);
 }
