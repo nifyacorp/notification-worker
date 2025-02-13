@@ -1,21 +1,37 @@
-import pino from 'pino';
+const LOG_LEVELS = {
+  error: 0,
+  warn: 1,
+  info: 2,
+  debug: 3
+};
 
-export const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  formatters: {
-    level: (label) => {
-      return { level: label };
-    },
+const currentLevel = LOG_LEVELS[process.env.LOG_LEVEL?.toLowerCase()] ?? LOG_LEVELS.info;
+
+function formatMessage(level, message, data = {}) {
+  const timestamp = new Date().toISOString();
+  const dataString = Object.keys(data).length ? ` ${JSON.stringify(data)}` : '';
+  return `${timestamp} ${level.toUpperCase()}: ${message}${dataString}`;
+}
+
+export const logger = {
+  error: (message, data) => {
+    if (currentLevel >= LOG_LEVELS.error) {
+      console.error(formatMessage('error', message, data));
+    }
   },
-  base: {
-    service: 'notification-worker',
+  warn: (message, data) => {
+    if (currentLevel >= LOG_LEVELS.warn) {
+      console.warn(formatMessage('warn', message, data));
+    }
   },
-  transport: {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      translateTime: 'SYS:standard',
-      ignore: 'pid,hostname'
+  info: (message, data) => {
+    if (currentLevel >= LOG_LEVELS.info) {
+      console.info(formatMessage('info', message, data));
+    }
+  },
+  debug: (message, data) => {
+    if (currentLevel >= LOG_LEVELS.debug) {
+      console.debug(formatMessage('debug', message, data));
     }
   }
-});
+};
