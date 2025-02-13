@@ -5,10 +5,6 @@ import { processRealEstateMessage } from './processors/real-estate.js';
 import { logger } from './utils/logger.js';
 import http from 'http';
 
-logger.info('Initializing PubSub client', {
-  project: process.env.GOOGLE_CLOUD_PROJECT
-});
-
 const pubsub = new PubSub({
   projectId: process.env.GOOGLE_CLOUD_PROJECT,
 });
@@ -26,11 +22,6 @@ server.listen(port, () => {
 
 const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION);
 const dlqTopic = pubsub.topic(process.env.DLQ_TOPIC);
-
-logger.info('PubSub configuration', {
-  subscription: process.env.PUBSUB_SUBSCRIPTION,
-  dlq_topic: process.env.DLQ_TOPIC
-});
 
 const PROCESSOR_MAP = {
   'boe': processBOEMessage,
@@ -93,26 +84,6 @@ subscription.on('error', (error) => {
   logger.error('Subscription error', { error });
 });
 
-// Initialize all services
-async function initializeServices() {
-  try {
-    // Test database connection
-    await db.testConnection();
-    
-    // Test PubSub subscription existence
-    const [exists] = await subscription.exists();
-    if (!exists) {
-      throw new Error(`Subscription ${process.env.PUBSUB_SUBSCRIPTION} does not exist`);
-    }
-    logger.info('PubSub subscription verified');
-    
-    return true;
-  } catch (error) {
-    logger.error('Service initialization failed', { error });
-    throw error;
-  }
-}
-
 process.on('SIGTERM', async () => {
   logger.info('Received SIGTERM signal, shutting down gracefully');
   subscription.close();
@@ -120,16 +91,8 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-// Start everything up
-try {
-  await initializeServices();
-  
-  logger.info('Notification worker started successfully', {
-    subscription: process.env.PUBSUB_SUBSCRIPTION,
-    project: process.env.GOOGLE_CLOUD_PROJECT,
-    port: port
-  });
-} catch (error) {
-  logger.error('Failed to start notification worker', { error });
-  process.exit(1);
-}
+logger.info('Notification worker started', {
+  subscription: process.env.PUBSUB_SUBSCRIPTION,
+  project: process.env.GOOGLE_CLOUD_PROJECT,
+  port: port
+});
