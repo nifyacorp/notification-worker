@@ -4,10 +4,12 @@ import { logger } from '../utils/logger.js';
 const { Pool } = pg;
 
 const config = {
+  // Required connection config
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   host: `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}`,
+  // Pool config
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
@@ -16,7 +18,11 @@ const config = {
 const pool = new Pool(config);
 
 pool.on('error', (err) => {
-  logger.error('Unexpected database error', { error: err });
+  logger.error('Unexpected database error', {
+    error: err.message,
+    stack: err.stack,
+    code: err.code
+  });
 });
 
 // Test database connection
@@ -28,8 +34,18 @@ async function testConnection() {
     logger.info('Connected to database', {
       timestamp: result.rows[0].now
     });
+    return result;
   } catch (err) {
-    logger.error('Database connection failed', { error: err });
+    logger.error('Database connection failed', {
+      error: err.message,
+      stack: err.stack,
+      code: err.code,
+      config: {
+        user: config.user,
+        database: config.database,
+        host: config.host
+      }
+    });
     throw err;
   } finally {
     if (client) {
@@ -41,14 +57,23 @@ async function testConnection() {
 export const db = {
   query: async (text, params) => {
     const start = Date.now();
-    return pool.query(text, params).catch(err => {
+    try {
+      const result = await pool.query(text, params);
+      const duration = Date.now() - start;
+      logger.debug('Executed query', {
+        text,
+        duration,
+        rows: result.rowCount
       });
       return result;
     } catch (err) {
       logger.error('Query failed', {
-        error: err,
+        error: err.message,
+        stack: err.stack,
+        code: err.code,
         text,
         params
+      });
       throw err;
     }
   },
