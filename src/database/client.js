@@ -6,25 +6,20 @@ const { Pool } = pg;
 // Log all available DB-related environment variables
 logger.info('Database environment configuration', {
   NODE_ENV: process.env.NODE_ENV,
-  DB_USER: process.env.DB_USER || 'postgres',
+  DB_USER: process.env.DB_USER,
   DB_NAME: process.env.DB_NAME,
-  DB_HOST: process.env.NODE_ENV === 'production' ? undefined : 'localhost',
   INSTANCE_CONNECTION_NAME: process.env.INSTANCE_CONNECTION_NAME,
   HAS_PASSWORD: !!process.env.DB_PASSWORD
 });
 
 const config = {
-  user: process.env.DB_USER || 'postgres',
+  user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  host: process.env.NODE_ENV === 'production' ? undefined : 'localhost',
   max: 5, // Reduce max connections for better error visibility
   connectionTimeoutMillis: 5000, // Reduce timeout to fail faster
-  ssl: process.env.NODE_ENV === 'production',
-  // Add Unix domain socket configuration for Cloud SQL
   ...(process.env.NODE_ENV === 'production' && {
-    host: '/cloudsql',
-    connectionString: `host=/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}`
+    host: `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}`
   })
 };
 
