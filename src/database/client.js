@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { logger } from '../utils/logger.js';
+import { existsSync } from 'fs';
 
 const INSTANCE_CONNECTION_NAME = process.env.GOOGLE_CLOUD_PROJECT 
   ? `${process.env.GOOGLE_CLOUD_PROJECT}:us-central1:nifya-db` 
@@ -36,7 +37,7 @@ logger.info('Database connection configuration', {
   connectionTimeoutMillis: config.connectionTimeoutMillis,
   environment: process.env.NODE_ENV,
   socketExists: process.env.NODE_ENV === 'production' ? 
-    require('fs').existsSync(config.host) : 'N/A'
+    existsSync(config.host) : 'N/A'
 });
 
 const pool = new Pool(config);
@@ -80,7 +81,7 @@ async function testConnection() {
       user: config.user,
       database: config.database,
       socketExists: process.env.NODE_ENV === 'production' ? 
-        require('fs').existsSync(config.host) : 'N/A'
+        existsSync(config.host) : 'N/A'
     });
     throw err;
   } finally {
