@@ -8,10 +8,10 @@ logger.info('Database environment configuration', {
   NODE_ENV: process.env.NODE_ENV,
   DB_USER: process.env.DB_USER,
   DB_NAME: process.env.DB_NAME,
-  HAS_PASSWORD: !!process.env.DB_PASSWORD
+  DB_HOST: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : 'localhost',
+  HAS_PASSWORD: !!process.env.DB_PASSWORD,
+  INSTANCE_CONNECTION_NAME: process.env.INSTANCE_CONNECTION_NAME
 });
-
-const INSTANCE_CONNECTION_NAME = 'delta-entity-447812-p2:us-central1:nifya-db';
 
 const config = {
   user: process.env.DB_USER,
@@ -20,8 +20,14 @@ const config = {
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
-  host: process.env.NODE_ENV === 'production' ? `/cloudsql/${INSTANCE_CONNECTION_NAME}` : 'localhost'
+  host: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : 'localhost',
+  keepAlive: true
 };
+
+logger.info('Database connection configuration', {
+  ...config,
+  password: config.password ? '[REDACTED]' : undefined
+});
 
 const pool = new Pool(config);
 
@@ -45,9 +51,11 @@ async function testConnection() {
     logger.error('Database connection failed', {
       error: err.message,
       code: err.code,
-      connection: `${process.env.NODE_ENV === 'production' ? 'Unix socket' : 'TCP'}: ${config.host}`,
+      errorStack: err.stack,
+      host: config.host,
       user: config.user,
-      database: config.database
+      database: config.database,
+      socketPath: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : undefined
     });
     throw err;
   } finally {
