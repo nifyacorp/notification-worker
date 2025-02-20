@@ -4,24 +4,19 @@ import { logger } from '../utils/logger.js';
 const { Pool } = pg;
 
 // Log all available DB-related environment variables
-logger.info('Database environment configuration', {
-  NODE_ENV: process.env.NODE_ENV,
-  DB_USER: process.env.DB_USER,
-  DB_NAME: process.env.DB_NAME,
-  DB_HOST: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : 'localhost',
-  HAS_PASSWORD: !!process.env.DB_PASSWORD,
-  INSTANCE_CONNECTION_NAME: process.env.INSTANCE_CONNECTION_NAME
-});
+const isProduction = process.env.NODE_ENV === 'production';
+const socketPath = isProduction ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : undefined;
 
 const config = {
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  max: 20,
-  idleTimeoutMillis: 30000,
+  max: 10, // Reduce connection pool size
+  idleTimeoutMillis: 10000, // Reduce idle timeout
   connectionTimeoutMillis: 5000,
-  host: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : 'localhost',
-  keepAlive: true
+  host: isProduction ? undefined : 'localhost',
+  keepAlive: true,
+  ...(socketPath && { host: socketPath })
 };
 
 logger.info('Database connection configuration', {
@@ -52,10 +47,9 @@ async function testConnection() {
       error: err.message,
       code: err.code,
       errorStack: err.stack,
-      host: config.host,
+      socketPath,
       user: config.user,
-      database: config.database,
-      socketPath: process.env.NODE_ENV === 'production' ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : undefined
+      database: config.database
     });
     throw err;
   } finally {
