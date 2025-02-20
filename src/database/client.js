@@ -1,27 +1,42 @@
 import pg from 'pg';
 import { logger } from '../utils/logger.js';
 
-const { Pool } = pg;
+const INSTANCE_CONNECTION_NAME = process.env.GOOGLE_CLOUD_PROJECT 
+  ? `${process.env.GOOGLE_CLOUD_PROJECT}:us-central1:nifya-db` 
+  : 'delta-entity-447812-p2:us-central1:nifya-db';
 
-// Log all available DB-related environment variables
-const isProduction = process.env.NODE_ENV === 'production';
-const socketPath = isProduction ? `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}` : undefined;
+const { Pool } = pg;
 
 const config = {
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  max: 10, // Reduce connection pool size
-  idleTimeoutMillis: 10000, // Reduce idle timeout
-  connectionTimeoutMillis: 5000,
-  host: isProduction ? undefined : 'localhost',
-  keepAlive: true,
-  ...(socketPath && { host: socketPath })
+  ...(process.env.NODE_ENV === 'production' ? {
+    host: `/cloudsql/${INSTANCE_CONNECTION_NAME}`,
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+    application_name: 'notification-worker',
+    statement_timeout: 10000,
+    query_timeout: 10000,
+    keepalive: true,
+    keepaliveInitialDelayMillis: 10000
+  } : {
+    host: 'localhost',
+    port: 5432
+  })
 };
 
 logger.info('Database connection configuration', {
-  ...config,
-  password: config.password ? '[REDACTED]' : undefined
+  host: config.host,
+  database: config.database,
+  user: config.user,
+  max: config.max,
+  idleTimeoutMillis: config.idleTimeoutMillis,
+  connectionTimeoutMillis: config.connectionTimeoutMillis,
+  environment: process.env.NODE_ENV,
+  socketExists: process.env.NODE_ENV === 'production' ? 
+    require('fs').existsSync(config.host) : 'N/A'
 });
 
 const pool = new Pool(config);
@@ -40,16 +55,32 @@ async function testConnection() {
   try {
     logger.info('Testing database connection');
     client = await pool.connect();
-    await client.query('SELECT 1');
-    logger.info('Database connection successful');
+    const [versionResult, tablesResult] = await Promise.all([
+      client.query('SELECT version()'),
+      client.query(`
+        SELECT table_name, 
+               (SELECT count(*) FROM information_schema.columns WHERE table_name = t.table_name) as column_count
+        FROM information_schema.tables t
+        WHERE table_schema = 'public'
+      `)
+    ]);
+    
+    logger.info({
+      phase: 'connection_test_success',
+      pgVersion: versionResult.rows[0]?.version,
+      tableCount: tablesResult.rows?.length,
+      tables: tablesResult.rows.map(r => r.table_name)
+    }, 'Database connection successful');
   } catch (err) {
     logger.error('Database connection failed', {
       error: err.message,
       code: err.code,
       errorStack: err.stack,
-      socketPath,
+      host: config.host,
       user: config.user,
-      database: config.database
+      database: config.database,
+      socketExists: process.env.NODE_ENV === 'production' ? 
+        require('fs').existsSync(config.host) : 'N/A'
     });
     throw err;
   } finally {
