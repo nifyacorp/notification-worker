@@ -14,7 +14,8 @@
   "dependencies": {
     "@google-cloud/pubsub": "^4.0.7",
     "pg": "^8.11.3",
-    "zod": "^3.22.4"
+    "zod": "^3.22.4",
+    "@google-cloud/secret-manager": "^5.0.0"
   },
   "devDependencies": {
     "eslint": "^8.56.0",
