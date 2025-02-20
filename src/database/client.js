@@ -9,15 +9,15 @@ const INSTANCE_CONNECTION_NAME = process.env.GOOGLE_CLOUD_PROJECT
 const { Pool } = pg;
 
 const config = {
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
+  user: 'postgres',
+  password: 'Nf2025!DB#pG9$kL',
+  database: 'nifya',
   ...(process.env.NODE_ENV === 'production' ? {
     host: `/cloudsql/${INSTANCE_CONNECTION_NAME}`,
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
-    application_name: 'notification-worker',
+    application_name: 'subscription-processor',
     statement_timeout: 10000,
     query_timeout: 10000,
     keepalive: true,
@@ -37,7 +37,7 @@ logger.info('Database connection configuration', {
   connectionTimeoutMillis: config.connectionTimeoutMillis,
   environment: process.env.NODE_ENV,
   socketExists: process.env.NODE_ENV === 'production' ? 
-    existsSync(config.host) : 'N/A'
+    existsSync(`/cloudsql/${INSTANCE_CONNECTION_NAME}`) : 'N/A'
 });
 
 const pool = new Pool(config);
