@@ -11,13 +11,16 @@ logger.info('Database environment configuration', {
   HAS_PASSWORD: !!process.env.DB_PASSWORD
 });
 
+const INSTANCE_CONNECTION_NAME = 'delta-entity-447812-p2:us-central1:nifya-db';
+
 const config = {
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  max: 10,
-  connectionTimeoutMillis: 10000,
-  host: process.env.NODE_ENV === 'production' ? '/cloudsql/delta-entity-447812-p2:us-central1:nifya-db' : 'localhost'
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+  host: process.env.NODE_ENV === 'production' ? `/cloudsql/${INSTANCE_CONNECTION_NAME}` : 'localhost'
 };
 
 const pool = new Pool(config);
