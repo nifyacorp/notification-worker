@@ -107,6 +107,47 @@ async function testConnection(pool) {
 
 let pool;
 
+export const db = {
+  query: async (text, params) => {
+    if (!pool) {
+      pool = await initializePool();
+    }
+    const start = Date.now();
+    try {
+      const result = await pool.query(text, params);
+      const duration = Date.now() - start;
+      logger.debug('Query executed successfully', {
+        text,
+        duration,
+        rows: result.rowCount,
+        command: result.command
+      });
+      return result;
+    } catch (error) {
+      logger.error('Query failed', {
+        error: error.message,
+        error_code: error.code,
+        stack: error.stack,
+        severity: error.severity,
+        detail: error.detail,
+        hint: error.hint,
+        text,
+        params,
+        duration: Date.now() - start
+      });
+      throw error;
+    }
+  },
+  end: async () => {
+    if (pool) {
+      logger.info('Closing database connection pool');
+      await pool.end();
+      logger.info('Database connection pool closed');
+      pool = null;
+    }
+  }
+};
+
 export async function initializePool() {
   try {
     const config = await createPoolConfig();
