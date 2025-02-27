@@ -138,6 +138,14 @@ export const db = {
       throw error;
     }
   },
+  testConnection: async () => {
+    if (!pool) {
+      pool = await initializePool();
+    } else {
+      await testConnection(pool);
+    }
+    return true;
+  },
   end: async () => {
     if (pool) {
       logger.info('Closing database connection pool');
