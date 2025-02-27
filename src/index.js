@@ -12,7 +12,18 @@ let serviceState = {
   pubsubConnected: false,
   subscriptionActive: false,
   errors: [],
-  startTime: new Date().toISOString()
+  startTime: new Date().toISOString(),
+  ready: false,
+  databaseActive: true,
+  pubsubActive: true,
+  operatingMode: 'initializing',
+  messageCount: 0,
+  validationErrors: 0,
+  unknownProcessorErrors: 0,
+  dbUnavailableErrors: 0,
+  successfulMessages: 0,
+  processingErrors: 0,
+  lastActivity: null
 };
 
 // Initialize PubSub client
@@ -63,9 +74,10 @@ server.listen(port, () => {
   logger.info(`HTTP server listening on port ${port}`);
 });
 
+// Update the processor map to indicate which processors require database access
 const PROCESSOR_MAP = {
-  'boe': processBOEMessage,
-  'real-estate': processRealEstateMessage,
+  'boe': Object.assign(processBOEMessage, { requiresDatabase: true }),
+  'real-estate': Object.assign(processRealEstateMessage, { requiresDatabase: true }),
 };
 
 async function publishToDLQ(message, error) {
@@ -93,6 +105,11 @@ async function publishToDLQ(message, error) {
 async function processMessage(message) {
   let data;
   let rawMessage;
+  
+  // Track message processing activity
+  serviceState.lastActivity = new Date().toISOString();
+  serviceState.messageCount = (serviceState.messageCount || 0) + 1;
+  
   try {
     // Safely extract the message data
     try {
@@ -144,6 +161,10 @@ async function processMessage(message) {
       });
       await publishToDLQ(data, validationError);
       message.ack(); // Still ack the message to prevent redelivery of invalid message
+      
+      // Track validation errors
+      serviceState.validationErrors = (serviceState.validationErrors || 0) + 1;
+      
       return;
     }
     
@@ -156,12 +177,59 @@ async function processMessage(message) {
         processor_type: validatedData.processor_type,
         trace_id: validatedData.trace_id
       });
+      
+      // Track unknown processor errors
+      serviceState.unknownProcessorErrors = (serviceState.unknownProcessorErrors || 0) + 1;
+      
       return;
+    }
+
+    // Check database connection before processing message that needs DB
+    if (processor.requiresDatabase && !serviceState.databaseActive) {
+      // Try to reconnect to database if it's been down
+      try {
+        const dbConnected = await db.testConnection();
+        if (dbConnected) {
+          serviceState.databaseActive = true;
+          logger.info('Database connection restored during message processing');
+        } else {
+          // If database still down, send to DLQ with specific error
+          const error = new Error('Database unavailable for message that requires database access');
+          await publishToDLQ(validatedData, error);
+          message.ack(); // Ack to prevent redelivery until DB is fixed
+          
+          logger.warn('Message requires database but connection is down, sent to DLQ', {
+            processor_type: validatedData.processor_type,
+            trace_id: validatedData.trace_id
+          });
+          
+          // Track DB unavailable errors
+          serviceState.dbUnavailableErrors = (serviceState.dbUnavailableErrors || 0) + 1;
+          
+          return;
+        }
+      } catch (dbError) {
+        // Failed to test database connection
+        const error = new Error(`Database test failed: ${dbError.message}`);
+        await publishToDLQ(validatedData, error);
+        message.ack();
+        
+        logger.error('Failed to test database connection during message processing', {
+          error: dbError.message,
+          processor_type: validatedData.processor_type,
+          trace_id: validatedData.trace_id
+        });
+        
+        return;
+      }
     }
 
     await processor(validatedData);
     message.ack();
 
+    // Track successful processing
+    serviceState.successfulMessages = (serviceState.successfulMessages || 0) + 1;
+    
     logger.info('Successfully processed message', {
       trace_id: validatedData.trace_id,
       processor_type: validatedData.processor_type
@@ -177,6 +245,9 @@ async function processMessage(message) {
       processor_type: data?.processor_type
     });
 
+    // Track processing errors
+    serviceState.processingErrors = (serviceState.processingErrors || 0) + 1;
+    
     try {
       await publishToDLQ(data || { raw_message: rawMessage }, error);
       message.nack();
@@ -300,6 +371,8 @@ async function initializeServices() {
   
   if (services.length > 0) {
     logger.info(`Service initialized successfully with: ${services.join(', ')}`);
+    serviceState.ready = true;
+    serviceState.operatingMode = 'ready';
     return true;
   } else {
     logger.warn('Service running in limited mode - only health endpoint available');
@@ -339,3 +412,56 @@ try {
     stack: error.stack
   });
 }
+
+// Update the health endpoint to provide more diagnostics
+server.get('/health', async (req, res) => {
+  const dbState = db.getConnectionState();
+  const uptime = process.uptime();
+  const memoryUsage = process.memoryUsage();
+  
+  // More detailed health status
+  const healthStatus = {
+    status: serviceState.ready ? 'ready' : 'initializing',
+    uptime: uptime,
+    uptime_formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`,
+    memory: {
+      rss: Math.round(memoryUsage.rss / 1024 / 1024),
+      heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+      heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+      external: Math.round(memoryUsage.external / 1024 / 1024)
+    },
+    services: {
+      database: {
+        connected: serviceState.databaseActive,
+        last_error: dbState.lastErrorMessage,
+        init_count: dbState.initCount,
+        last_init: dbState.lastInitTime,
+        pool_stats: dbState.poolStats
+      },
+      pubsub: {
+        connected: serviceState.pubsubActive,
+        subscription: {
+          exists: serviceState.subscriptionActive,
+          name: process.env.PUBSUB_SUBSCRIPTION
+        }
+      }
+    },
+    operating_mode: serviceState.operatingMode,
+    initialization_errors: serviceState.errors,
+    has_recent_activity: serviceState.lastActivity ? 
+      (Date.now() - new Date(serviceState.lastActivity).getTime() < 300000) : false,
+    last_activity: serviceState.lastActivity,
+    env: process.env.NODE_ENV,
+    version: process.env.VERSION || 'unknown'
+  };
+
+  // Choose status code based on health state
+  let statusCode = 200;
+  
+  // Still return 200 even if database is down, as long as worker is ready for messages
+  if (!serviceState.ready && !serviceState.pubsubActive) {
+    statusCode = 503; // Service Unavailable
+  }
+  
+  res.status(statusCode).json(healthStatus);
+});
