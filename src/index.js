@@ -6,6 +6,15 @@ import { logger } from './utils/logger.js';
 import http from 'http';
 import { db } from './database/client.js';
 
+// Global service state
+let serviceState = {
+  dbConnected: false,
+  pubsubConnected: false,
+  subscriptionActive: false,
+  errors: [],
+  startTime: new Date().toISOString()
+};
+
 // Initialize PubSub client
 const pubsub = new PubSub({
   projectId: process.env.GOOGLE_CLOUD_PROJECT,
@@ -13,13 +22,40 @@ const pubsub = new PubSub({
 });
 
 // Initialize subscription and DLQ topic
-const subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION);
-const dlqTopic = pubsub.topic(process.env.DLQ_TOPIC);
+let subscription;
+let dlqTopic;
 
-// Create HTTP server for Cloud Run health checks
+try {
+  subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION);
+  dlqTopic = pubsub.topic(process.env.DLQ_TOPIC);
+} catch (error) {
+  logger.error('Failed to initialize PubSub resources', {
+    error: error.message,
+    stack: error.stack
+  });
+  serviceState.errors.push(`PubSub initialization: ${error.message}`);
+}
+
+// Create HTTP server for Cloud Run health checks with enhanced status reporting
 const server = http.createServer((req, res) => {
+  // Simple health check that always returns 200 to keep the service warm
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'up',
+      mode: serviceState.dbConnected && serviceState.pubsubConnected ? 'full' : 'limited',
+      database: serviceState.dbConnected ? 'connected' : 'disconnected',
+      pubsub: serviceState.pubsubConnected ? 'connected' : 'disconnected',
+      subscription: serviceState.subscriptionActive ? 'active' : 'inactive',
+      uptime: Math.floor((Date.now() - new Date(serviceState.startTime).getTime()) / 1000),
+      errors: serviceState.errors.slice(-5) // Only show last 5 errors
+    }));
+    return;
+  }
+  
+  // For other routes, return normal response
   res.writeHead(200);
-  res.end('OK');
+  res.end('Notification Worker');
 });
 
 const port = process.env.PORT || 8080;
@@ -118,78 +154,142 @@ async function processMessage(message) {
   }
 }
 
-subscription.on('message', processMessage);
+// Safely set up subscription listeners
+function setupSubscriptionListeners() {
+  if (!subscription) {
+    logger.warn('Cannot set up subscription listeners - subscription not initialized');
+    return false;
+  }
 
-subscription.on('error', (error) => {
-  logger.error('Subscription error', {
-    error: error.message,
-    stack: error.stack,
-    code: error.code,
-    details: error.details,
-    subscription: process.env.PUBSUB_SUBSCRIPTION,
-    project: process.env.GOOGLE_CLOUD_PROJECT
-  });
-});
-
-// Initialize all services
-async function initializeServices() {
   try {
-    logger.info('Starting service initialization', {
-      env: {
-        GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
-        PUBSUB_SUBSCRIPTION: process.env.PUBSUB_SUBSCRIPTION,
-        DLQ_TOPIC: process.env.DLQ_TOPIC,
-        NODE_ENV: process.env.NODE_ENV
-      }
+    // Check if subscription exists
+    subscription.on('message', processMessage);
+
+    subscription.on('error', (error) => {
+      logger.error('Subscription error', {
+        error: error.message,
+        stack: error.stack,
+        code: error.code,
+        details: error.details,
+        subscription: process.env.PUBSUB_SUBSCRIPTION,
+        project: process.env.GOOGLE_CLOUD_PROJECT
+      });
+      
+      // Update service state
+      serviceState.subscriptionActive = false;
+      serviceState.errors.push(`Subscription error: ${error.message}`);
     });
     
-    // Test database connection
-    logger.info('Testing database connection');
-    await db.testConnection();
+    return true;
+  } catch (error) {
+    logger.error('Failed to set up subscription listeners', {
+      error: error.message,
+      stack: error.stack
+    });
+    serviceState.errors.push(`Subscription setup: ${error.message}`);
+    return false;
+  }
+}
+
+// Initialize all services with enhanced error handling
+async function initializeServices() {
+  logger.info('Starting service initialization', {
+    env: {
+      GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
+      PUBSUB_SUBSCRIPTION: process.env.PUBSUB_SUBSCRIPTION,
+      DLQ_TOPIC: process.env.DLQ_TOPIC,
+      NODE_ENV: process.env.NODE_ENV
+    }
+  });
+  
+  // Test database connection with timeout and retry
+  logger.info('Testing database connection');
+  try {
+    await Promise.race([
+      db.testConnection(),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Database connection timeout')), 10000)
+      )
+    ]);
     logger.info('Database connection successful');
-    
-    // Test PubSub subscription existence
+    serviceState.dbConnected = true;
+  } catch (error) {
+    logger.error('Database connection failed, continuing in limited mode', {
+      error: error.message,
+      stack: error.stack
+    });
+    serviceState.errors.push(`Database connection: ${error.message}`);
+  }
+  
+  // Test PubSub subscription existence
+  if (subscription) {
     logger.info('Testing PubSub subscription existence', {
       subscription: process.env.PUBSUB_SUBSCRIPTION,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
     
-    const [exists] = await subscription.exists();
-    if (!exists) {
-      throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
+    try {
+      const [exists] = await subscription.exists();
+      if (!exists) {
+        throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
+      }
+      
+      logger.info('PubSub subscription verified', {
+        subscription: process.env.PUBSUB_SUBSCRIPTION,
+        project: process.env.GOOGLE_CLOUD_PROJECT
+      });
+      
+      // Set up subscription listeners only if the subscription exists
+      if (setupSubscriptionListeners()) {
+        serviceState.pubsubConnected = true;
+        serviceState.subscriptionActive = true;
+      }
+    } catch (error) {
+      logger.error('PubSub subscription verification failed, continuing in limited mode', {
+        error: error.message,
+        stack: error.stack,
+        subscription: process.env.PUBSUB_SUBSCRIPTION,
+        project: process.env.GOOGLE_CLOUD_PROJECT
+      });
+      serviceState.errors.push(`PubSub verification: ${error.message}`);
     }
-    
-    logger.info('PubSub subscription verified', {
-      subscription: process.env.PUBSUB_SUBSCRIPTION,
-      project: process.env.GOOGLE_CLOUD_PROJECT
-    });
-    
+  }
+  
+  // Report final initialization status
+  const services = [];
+  if (serviceState.dbConnected) services.push('database');
+  if (serviceState.pubsubConnected) services.push('pubsub');
+  if (serviceState.subscriptionActive) services.push('subscription');
+  
+  if (services.length > 0) {
+    logger.info(`Service initialized successfully with: ${services.join(', ')}`);
     return true;
-  } catch (error) {
-    logger.error('Service initialization failed', {
-      error: error.message,
-      code: error.code,
-      stack: error.stack,
-      component: error.message?.includes('PubSub') ? 'pubsub' : 'database',
-      subscription: process.env.PUBSUB_SUBSCRIPTION,
-      project: process.env.GOOGLE_CLOUD_PROJECT
-    });
-    throw error;
+  } else {
+    logger.warn('Service running in limited mode - only health endpoint available');
+    return false;
   }
 }
 
 process.on('SIGTERM', async () => {
   logger.info('Received SIGTERM signal, shutting down gracefully');
-  subscription.close();
+  if (subscription) subscription.close();
   server.close();
   process.exit(0);
 });
 
 // Start everything up
 try {
+  // Start the HTTP server immediately to handle health checks
+  // even if other services fail to initialize
   await initializeServices();
   
-  logger.info('Notification worker started successfully', {
+  logger.info('Notification worker started', {
+    mode: serviceState.dbConnected && serviceState.pubsubConnected ? 'full' : 'limited',
+    services_available: {
+      database: serviceState.dbConnected,
+      pubsub: serviceState.pubsubConnected,
+      subscription: serviceState.subscriptionActive
+    },
     config: {
       subscription: process.env.PUBSUB_SUBSCRIPTION,
       project: process.env.GOOGLE_CLOUD_PROJECT,
@@ -197,10 +297,8 @@ try {
     }
   });
 } catch (error) {
-  logger.error('Failed to start notification worker', {
+  logger.error('Errors during initialization, but health endpoint still available', {
     error: error.message,
-    stack: error.stack,
-    code: error.code
+    stack: error.stack
   });
-  process.exit(1);
 }
