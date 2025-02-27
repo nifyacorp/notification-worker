@@ -92,23 +92,34 @@ async function publishToDLQ(message, error) {
 
 async function processMessage(message) {
   let data;
+  let rawMessage;
   try {
-    const rawMessage = message.data.toString();
-    logger.debug('Received PubSub message', {
-      messageId: message.id,
-      publishTime: message.publishTime,
-      attributes: message.attributes,
-      raw_data: rawMessage,
-      data_length: rawMessage.length,
-      subscription: process.env.PUBSUB_SUBSCRIPTION
-    });
+    // Safely extract the message data
+    try {
+      rawMessage = message.data.toString();
+      logger.debug('Received PubSub message', {
+        messageId: message.id,
+        publishTime: message.publishTime,
+        attributes: message.attributes,
+        data_length: rawMessage.length,
+        subscription: process.env.PUBSUB_SUBSCRIPTION
+      });
+    } catch (extractError) {
+      logger.error('Failed to extract message data', {
+        error: extractError.message,
+        message_id: message?.id
+      });
+      // Use empty object as fallback if message data can't be accessed
+      rawMessage = "{}";
+    }
 
+    // Safely parse the message JSON
     try {
       data = JSON.parse(rawMessage);
     } catch (parseError) {
       logger.error('Failed to parse message JSON', {
         error: parseError.message,
-        raw_data: rawMessage,
+        raw_data: rawMessage.substring(0, 200) + (rawMessage.length > 200 ? '...' : ''),
         message_id: message.id
       });
       throw parseError;
@@ -118,16 +129,34 @@ async function processMessage(message) {
       message_id: message.id,
       processor_type: data.processor_type,
       trace_id: data.trace_id,
-      timestamp: data.timestamp,
-      request: data.request,
-      metadata: data.metadata
+      timestamp: data.timestamp
     });
     
-    const validatedData = validateMessage(data);
+    // Gracefully handle validation
+    let validatedData;
+    try {
+      validatedData = validateMessage(data);
+    } catch (validationError) {
+      logger.error('Validation error, sending to DLQ', {
+        error: validationError.message,
+        processor_type: data.processor_type,
+        trace_id: data.trace_id
+      });
+      await publishToDLQ(data, validationError);
+      message.ack(); // Still ack the message to prevent redelivery of invalid message
+      return;
+    }
     
     const processor = PROCESSOR_MAP[validatedData.processor_type];
     if (!processor) {
-      throw new Error(`Unknown processor type: ${validatedData.processor_type}`);
+      const error = new Error(`Unknown processor type: ${validatedData.processor_type}`);
+      await publishToDLQ(validatedData, error);
+      message.ack(); // Ack unknown processor type messages too
+      logger.warn('Unknown processor type, message sent to DLQ', {
+        processor_type: validatedData.processor_type,
+        trace_id: validatedData.trace_id
+      });
+      return;
     }
 
     await processor(validatedData);
@@ -139,18 +168,26 @@ async function processMessage(message) {
     });
   } catch (error) {
     logger.error('Failed to process message', {
-      error,
+      error: error.message,
       error_stack: error.stack,
       error_name: error.name,
       trace_id: data?.trace_id,
-      raw_message: rawMessage,
-      message_id: message.id,
-      publish_time: message.publishTime,
+      message_id: message?.id,
+      publish_time: message?.publishTime,
       processor_type: data?.processor_type
     });
 
-    await publishToDLQ(data || { raw_message: message.data.toString() }, error);
-    message.nack();
+    try {
+      await publishToDLQ(data || { raw_message: rawMessage }, error);
+      message.nack();
+    } catch (dlqError) {
+      logger.error('Critical error publishing to DLQ', {
+        original_error: error.message,
+        dlq_error: dlqError.message
+      });
+      // Still nack the message to prevent the worker from hanging
+      message.nack();
+    }
   }
 }
 
