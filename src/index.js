@@ -23,7 +23,7 @@ let serviceState = {
   dbUnavailableErrors: 0,
   successfulMessages: 0,
   processingErrors: 0,
-  lastActivity: null
+  lastActivity: new Date().toISOString()
 };
 
 // Initialize PubSub client
@@ -48,19 +48,75 @@ try {
 }
 
 // Create HTTP server for Cloud Run health checks with enhanced status reporting
-const server = http.createServer((req, res) => {
-  // Simple health check that always returns 200 to keep the service warm
+const server = http.createServer(async (req, res) => {
+  // Health check endpoint with enhanced diagnostics
   if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'up',
-      mode: serviceState.dbConnected && serviceState.pubsubConnected ? 'full' : 'limited',
-      database: serviceState.dbConnected ? 'connected' : 'disconnected',
-      pubsub: serviceState.pubsubConnected ? 'connected' : 'disconnected',
-      subscription: serviceState.subscriptionActive ? 'active' : 'inactive',
-      uptime: Math.floor((Date.now() - new Date(serviceState.startTime).getTime()) / 1000),
-      errors: serviceState.errors.slice(-5) // Only show last 5 errors
-    }));
+    try {
+      const dbState = db.getConnectionState();
+      const uptime = process.uptime();
+      const memoryUsage = process.memoryUsage();
+      
+      // More detailed health status
+      const healthStatus = {
+        status: serviceState.ready ? 'ready' : 'initializing',
+        uptime: uptime,
+        uptime_formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`,
+        memory: {
+          rss: Math.round(memoryUsage.rss / 1024 / 1024),
+          heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+          heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+          external: Math.round(memoryUsage.external / 1024 / 1024)
+        },
+        services: {
+          database: {
+            connected: serviceState.databaseActive,
+            last_error: dbState.lastErrorMessage,
+            init_count: dbState.initCount,
+            last_init: dbState.lastInitTime,
+            pool_stats: dbState.poolStats
+          },
+          pubsub: {
+            connected: serviceState.pubsubActive,
+            subscription: {
+              exists: serviceState.subscriptionActive,
+              name: process.env.PUBSUB_SUBSCRIPTION
+            }
+          }
+        },
+        operating_mode: serviceState.operatingMode,
+        initialization_errors: serviceState.errors,
+        has_recent_activity: serviceState.lastActivity ? 
+          (Date.now() - new Date(serviceState.lastActivity).getTime() < 300000) : false,
+        last_activity: serviceState.lastActivity,
+        env: process.env.NODE_ENV,
+        version: process.env.VERSION || 'unknown'
+      };
+    
+      // Choose status code based on health state
+      let statusCode = 200;
+      
+      // Still return 200 even if database is down, as long as worker is ready for messages
+      if (!serviceState.ready && !serviceState.pubsubActive) {
+        statusCode = 503; // Service Unavailable
+      }
+      
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(healthStatus));
+    } catch (error) {
+      // Fallback health response in case of error
+      logger.error('Error generating health status', {
+        error: error.message,
+        stack: error.stack
+      });
+      
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'up',
+        mode: 'limited',
+        error: error.message,
+        uptime: process.uptime()
+      }));
+    }
     return;
   }
   
@@ -106,9 +162,9 @@ async function processMessage(message) {
   let data;
   let rawMessage;
   
-  // Track message processing activity
+  // Update last activity timestamp
   serviceState.lastActivity = new Date().toISOString();
-  serviceState.messageCount = (serviceState.messageCount || 0) + 1;
+  serviceState.messageCount++;
   
   try {
     // Safely extract the message data
@@ -235,6 +291,14 @@ async function processMessage(message) {
       processor_type: validatedData.processor_type
     });
   } catch (error) {
+    // Update error tracking
+    serviceState.processingErrors++;
+    serviceState.errors.push({
+      time: new Date().toISOString(),
+      message: error.message,
+      type: 'message_processing'
+    });
+    
     logger.error('Failed to process message', {
       error: error.message,
       error_stack: error.stack,
@@ -244,9 +308,6 @@ async function processMessage(message) {
       publish_time: message?.publishTime,
       processor_type: data?.processor_type
     });
-
-    // Track processing errors
-    serviceState.processingErrors = (serviceState.processingErrors || 0) + 1;
     
     try {
       await publishToDLQ(data || { raw_message: rawMessage }, error);
@@ -310,23 +371,29 @@ async function initializeServices() {
     }
   });
   
+  // First update state to show we're initializing but operational
+  serviceState.operatingMode = 'initializing';
+  
   // Test database connection with timeout and retry
   logger.info('Testing database connection');
   try {
     await Promise.race([
       db.testConnection(),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Database connection timeout')), 10000)
+        setTimeout(() => reject(new Error('Database connection timeout during initialization')), 10000)
       )
     ]);
     logger.info('Database connection successful');
     serviceState.dbConnected = true;
+    serviceState.databaseActive = true;
   } catch (error) {
     logger.error('Database connection failed, continuing in limited mode', {
       error: error.message,
       stack: error.stack
     });
     serviceState.errors.push(`Database connection: ${error.message}`);
+    serviceState.dbConnected = false;
+    serviceState.databaseActive = false;
   }
   
   // Test PubSub subscription existence
@@ -351,6 +418,7 @@ async function initializeServices() {
       if (setupSubscriptionListeners()) {
         serviceState.pubsubConnected = true;
         serviceState.subscriptionActive = true;
+        serviceState.pubsubActive = true;
       }
     } catch (error) {
       logger.error('PubSub subscription verification failed, continuing in limited mode', {
@@ -360,7 +428,15 @@ async function initializeServices() {
         project: process.env.GOOGLE_CLOUD_PROJECT
       });
       serviceState.errors.push(`PubSub verification: ${error.message}`);
+      serviceState.pubsubConnected = false;
+      serviceState.subscriptionActive = false;
+      serviceState.pubsubActive = false;
     }
+  } else {
+    logger.warn('PubSub subscription client not initialized, skipping verification');
+    serviceState.pubsubConnected = false;
+    serviceState.subscriptionActive = false;
+    serviceState.pubsubActive = false;
   }
   
   // Report final initialization status
@@ -372,10 +448,22 @@ async function initializeServices() {
   if (services.length > 0) {
     logger.info(`Service initialized successfully with: ${services.join(', ')}`);
     serviceState.ready = true;
-    serviceState.operatingMode = 'ready';
+    
+    if (services.includes('database') && services.includes('pubsub')) {
+      serviceState.operatingMode = 'full';
+    } else if (services.includes('pubsub')) {
+      serviceState.operatingMode = 'limited';
+    } else if (services.includes('database')) {
+      serviceState.operatingMode = 'database-only';
+    } else {
+      serviceState.operatingMode = 'health-only';
+    }
+    
     return true;
   } else {
-    logger.warn('Service running in limited mode - only health endpoint available');
+    logger.warn('Service running in minimal mode - only health endpoint available');
+    serviceState.operatingMode = 'health-only';
+    serviceState.ready = false; // Not fully ready, but health endpoint works
     return false;
   }
 }
@@ -412,56 +500,3 @@ try {
     stack: error.stack
   });
 }
-
-// Update the health endpoint to provide more diagnostics
-server.get('/health', async (req, res) => {
-  const dbState = db.getConnectionState();
-  const uptime = process.uptime();
-  const memoryUsage = process.memoryUsage();
-  
-  // More detailed health status
-  const healthStatus = {
-    status: serviceState.ready ? 'ready' : 'initializing',
-    uptime: uptime,
-    uptime_formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`,
-    memory: {
-      rss: Math.round(memoryUsage.rss / 1024 / 1024),
-      heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
-      heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
-      external: Math.round(memoryUsage.external / 1024 / 1024)
-    },
-    services: {
-      database: {
-        connected: serviceState.databaseActive,
-        last_error: dbState.lastErrorMessage,
-        init_count: dbState.initCount,
-        last_init: dbState.lastInitTime,
-        pool_stats: dbState.poolStats
-      },
-      pubsub: {
-        connected: serviceState.pubsubActive,
-        subscription: {
-          exists: serviceState.subscriptionActive,
-          name: process.env.PUBSUB_SUBSCRIPTION
-        }
-      }
-    },
-    operating_mode: serviceState.operatingMode,
-    initialization_errors: serviceState.errors,
-    has_recent_activity: serviceState.lastActivity ? 
-      (Date.now() - new Date(serviceState.lastActivity).getTime() < 300000) : false,
-    last_activity: serviceState.lastActivity,
-    env: process.env.NODE_ENV,
-    version: process.env.VERSION || 'unknown'
-  };
-
-  // Choose status code based on health state
-  let statusCode = 200;
-  
-  // Still return 200 even if database is down, as long as worker is ready for messages
-  if (!serviceState.ready && !serviceState.pubsubActive) {
-    statusCode = 503; // Service Unavailable
-  }
-  
-  res.status(statusCode).json(healthStatus);
-});

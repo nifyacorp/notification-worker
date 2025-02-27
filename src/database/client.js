@@ -93,29 +93,59 @@ async function createPoolConfig() {
 
 async function testConnection(pool, retryCount = 0) {
   try {
-    logger.info('Testing database connection', { retry_count: retryCount });
+    logger.info('Testing database connection', { 
+      retry_count: retryCount,
+      pool_exists: !!pool,
+      pool_stats: pool ? {
+        totalCount: pool.totalCount,
+        idleCount: pool.idleCount,
+        waitingCount: pool.waitingCount
+      } : null,
+      connection_state: connectionState
+    });
     
     // Set timeout for the whole test operation
     const timeout = setTimeout(() => {
+      logger.error('Database connection test timeout reached', {
+        retry_count: retryCount,
+        timeout_ms: 8000,
+        connection_state: connectionState
+      });
       throw new Error('Database connection test timeout');
     }, 8000); // 8 second timeout for test
 
     try {
       // Get a client from the pool with explicit timeout
+      logger.debug('Attempting to acquire client from pool');
+      const clientAcquisitionStart = Date.now();
+      
       const client = await Promise.race([
         pool.connect(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Client acquisition timeout')), 5000)
+          setTimeout(() => {
+            logger.error('Client acquisition timeout', {
+              timeout_ms: 5000,
+              retry_count: retryCount,
+              connection_state: connectionState
+            });
+            reject(new Error('Client acquisition timeout'));
+          }, 5000)
         )
       ]);
+      
+      logger.debug('Successfully acquired client from pool', {
+        duration_ms: Date.now() - clientAcquisitionStart
+      });
       
       const startTime = Date.now();
       
       // Execute a simple query that shouldn't take long
+      logger.debug('Executing simple test query');
       const result = await client.query('SELECT 1 as connection_test');
       
       // Only if that succeeds, try the more expensive queries
       if (result.rows[0].connection_test === 1) {
+        logger.debug('Simple test query succeeded, running diagnostic queries');
         const [versionResult, tablesResult] = await Promise.all([
           client.query('SELECT version()'),
           client.query(`
@@ -135,16 +165,22 @@ async function testConnection(pool, retryCount = 0) {
           tableCount: tablesResult.rows?.length,
           tables: tablesResult.rows.map(r => r.table_name),
           duration_ms: duration,
-          retry_count: retryCount
+          retry_count: retryCount,
+          connection_state: {
+            ...connectionState,
+            connection_test_duration_ms: duration
+          }
         }, 'Database connection successful');
       }
       
+      logger.debug('Releasing client back to pool');
       client.release();
       clearTimeout(timeout);
       
       // Update connection state
       connectionState.isConnected = true;
       connectionState.lastErrorMessage = null;
+      connectionState.lastSuccessTime = new Date().toISOString();
       
       return true;
     } catch (error) {
@@ -155,12 +191,14 @@ async function testConnection(pool, retryCount = 0) {
     // Update connection state with error
     connectionState.isConnected = false;
     connectionState.lastErrorMessage = error.message;
+    connectionState.lastErrorTime = new Date().toISOString();
     
     logger.error('Database connection failed', {
       error: error.message,
       code: error.code,
       stack: error.stack,
-      retry_count: retryCount
+      retry_count: retryCount,
+      connection_state: connectionState
     });
     
     // Retry up to 2 times with exponential backoff
@@ -300,30 +338,55 @@ export async function initializePool() {
   connectionState.lastInitTime = new Date().toISOString();
   
   try {
+    logger.info('Initializing database pool', {
+      init_count: connectionState.initCount,
+      existing_pool: !!pool,
+      connection_state: connectionState
+    });
+    
     const config = await createPoolConfig();
     
     // If there's an existing pool, end it properly before creating a new one
     if (pool) {
       try {
-        logger.info('Ending existing pool before creating a new one');
+        logger.info('Ending existing pool before creating a new one', {
+          pool_stats: {
+            totalCount: pool.totalCount,
+            idleCount: pool.idleCount,
+            waitingCount: pool.waitingCount
+          }
+        });
         await pool.end();
       } catch (endError) {
-        logger.warn('Error ending existing pool', { error: endError.message });
+        logger.warn('Error ending existing pool', { 
+          error: endError.message,
+          stack: endError.stack 
+        });
         // Continue anyway to create a new pool
       }
     }
     
     // Create new pool
+    logger.info('Creating new database pool with config', {
+      host: config.host.includes('cloudsql') ? 'cloudsql' : config.host,
+      max_connections: config.max,
+      min_connections: config.min,
+      idle_timeout: config.idleTimeoutMillis,
+      connection_timeout: config.connectionTimeoutMillis
+    });
+    
     pool = new Pool(config);
     
     pool.on('error', (error) => {
       logger.error('Unexpected database pool error', {
         error: error.message,
         code: error.code,
-        detail: error.detail
+        detail: error.detail,
+        connection_state: connectionState
       });
       connectionState.isConnected = false;
       connectionState.lastErrorMessage = error.message;
+      connectionState.lastErrorTime = new Date().toISOString();
     });
     
     pool.on('connect', (client) => {
@@ -335,6 +398,7 @@ export async function initializePool() {
     });
 
     // Test the new pool
+    logger.info('Testing new database pool');
     await testConnection(pool);
     
     return pool;
@@ -343,7 +407,8 @@ export async function initializePool() {
       error: error.message,
       code: error.code,
       stack: error.stack,
-      init_count: connectionState.initCount
+      init_count: connectionState.initCount,
+      connection_state: connectionState
     });
     throw error;
   } finally {
