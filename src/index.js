@@ -4,8 +4,11 @@ import { processBOEMessage } from './processors/boe.js';
 import { processRealEstateMessage } from './processors/real-estate.js';
 import { logger } from './utils/logger.js';
 import http from 'http';
-import { db } from './database/client.js';
+import { db, connectionState, query } from './database/client.js';
 import { v4 as uuidv4 } from 'uuid';
+import { createNotification } from './services/notification.js';
+import { processMessage } from './process.js';
+import url from 'url';
 
 // Global service state
 let serviceState = {
@@ -48,82 +51,234 @@ try {
   serviceState.errors.push(`PubSub initialization: ${error.message}`);
 }
 
-// Create HTTP server for Cloud Run health checks with enhanced status reporting
+// Create HTTP server for Cloud Run health checks
 const server = http.createServer(async (req, res) => {
-  // Health check endpoint with enhanced diagnostics
-  if (req.url === '/health') {
-    try {
-      const dbState = db.getConnectionState();
-      const uptime = process.uptime();
-      const memoryUsage = process.memoryUsage();
-      
-      // More detailed health status
-      const healthStatus = {
-        status: serviceState.ready ? 'ready' : 'initializing',
-        uptime: uptime,
-        uptime_formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`,
-        memory: {
-          rss: Math.round(memoryUsage.rss / 1024 / 1024),
-          heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
-          heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
-          external: Math.round(memoryUsage.external / 1024 / 1024)
-        },
-        services: {
-          database: {
-            connected: serviceState.databaseActive,
-            last_error: dbState.lastErrorMessage,
-            init_count: dbState.initCount,
-            last_init: dbState.lastInitTime,
-            pool_stats: dbState.poolStats
-          },
-          pubsub: {
-            connected: serviceState.pubsubActive,
-            subscription: {
-              exists: serviceState.subscriptionActive,
-              name: process.env.PUBSUB_SUBSCRIPTION
-            }
-          }
-        },
-        operating_mode: serviceState.operatingMode,
-        initialization_errors: serviceState.errors,
-        has_recent_activity: serviceState.lastActivity ? 
-          (Date.now() - new Date(serviceState.lastActivity).getTime() < 300000) : false,
-        last_activity: serviceState.lastActivity,
-        env: process.env.NODE_ENV,
-        version: process.env.VERSION || 'unknown'
-      };
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Parse the URL to get the path
+  const parsedUrl = url.parse(req.url, true);
+  const path = parsedUrl.pathname;
+  
+  // Basic health check endpoint
+  if (path === '/health') {
+    const memoryUsage = process.memoryUsage();
     
-      // Choose status code based on health state
-      let statusCode = 200;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'OK',
+      service: 'notification-worker',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      memory: {
+        rss: `${Math.round(memoryUsage.rss / 1024 / 1024)} MB`,
+        heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`,
+        heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)} MB`
+      },
+      database: {
+        connected: connectionState.isConnected,
+        lastConnectAttempt: connectionState.lastConnectAttempt,
+        failedAttempts: connectionState.failedAttempts
+      }
+    }));
+    return;
+  }
+  
+  // Database diagnostics endpoint
+  if (path === '/diagnostics/database') {
+    try {
+      // Parse query parameters
+      const queryParams = parsedUrl.query;
+      const userId = queryParams.userId || '8bf705b5-2423-4257-92bd-ab0df1ee3218'; // Default test user ID
       
-      // Still return 200 even if database is down, as long as worker is ready for messages
-      if (!serviceState.ready && !serviceState.pubsubActive) {
-        statusCode = 503; // Service Unavailable
+      // Check database connection
+      const dbConnectionStatus = {
+        isConnected: connectionState.isConnected,
+        lastConnectAttempt: connectionState.lastConnectAttempt,
+        failedAttempts: connectionState.failedAttempts,
+        connectionHistory: connectionState.connectionHistory.slice(-5) // Last 5 connection events
+      };
+      
+      // Diagnostic queries
+      let notificationCount = null;
+      let databaseRole = null;
+      let testNotificationResult = null;
+      
+      // Only run these if we're connected
+      if (connectionState.isConnected) {
+        try {
+          // Try to count notifications for user
+          const countResult = await query('SELECT COUNT(*) FROM notifications WHERE user_id = $1', [userId]);
+          notificationCount = parseInt(countResult.rows[0].count, 10);
+          
+          // Check current database role
+          const roleResult = await query('SELECT current_user, current_database()');
+          databaseRole = roleResult.rows[0];
+          
+          // Try to create a test notification
+          const testNotification = {
+            user_id: userId,
+            subscription_id: '00000000-0000-0000-0000-000000000000', // Test subscription ID
+            title: 'Database Diagnostic Test',
+            content: 'This is a test notification from the diagnostics endpoint',
+            source_url: '',
+            metadata: JSON.stringify({
+              diagnostic: true,
+              timestamp: new Date().toISOString(),
+              source: 'diagnostics-endpoint'
+            })
+          };
+          
+          try {
+            // Direct database insertion to test database access
+            const insertResult = await query(
+              `INSERT INTO notifications (
+                user_id, subscription_id, title, content, source_url, metadata, created_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+              [
+                testNotification.user_id,
+                testNotification.subscription_id,
+                testNotification.title,
+                testNotification.content,
+                testNotification.source_url,
+                testNotification.metadata,
+                new Date()
+              ]
+            );
+            
+            testNotificationResult = {
+              success: true,
+              notification_id: insertResult.rows[0].id
+            };
+          } catch (insertError) {
+            testNotificationResult = {
+              success: false,
+              error: insertError.message,
+              code: insertError.code
+            };
+          }
+        } catch (queryError) {
+          console.error('Diagnostic query error:', queryError);
+        }
       }
       
-      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(healthStatus));
-    } catch (error) {
-      // Fallback health response in case of error
-      logger.error('Error generating health status', {
-        error: error.message,
-        stack: error.stack
-      });
+      // Get environment variables (redact sensitive values)
+      const envVars = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        // Redact sensitive values
+        if (key.includes('PASSWORD') || key.includes('KEY') || key.includes('SECRET')) {
+          envVars[key] = '[REDACTED]';
+        } else {
+          envVars[key] = value;
+        }
+      }
       
+      // Send diagnostics response
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: 'up',
-        mode: 'limited',
-        error: error.message,
-        uptime: process.uptime()
+        timestamp: new Date().toISOString(),
+        service: 'notification-worker',
+        database: dbConnectionStatus,
+        diagnostics: {
+          user_id: userId,
+          notification_count: notificationCount,
+          database_role: databaseRole,
+          test_notification: testNotificationResult
+        },
+        environment: envVars
+      }, null, 2));
+    } catch (error) {
+      console.error('Diagnostics endpoint error:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Diagnostics failed',
+        message: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       }));
     }
     return;
   }
   
-  // For other routes, return normal response
-  res.writeHead(200);
-  res.end('Notification Worker');
+  // Add endpoint to test notification creation through the service
+  if (path === '/diagnostics/create-notification' && req.method === 'POST') {
+    try {
+      // Read request body
+      let body = '';
+      req.on('data', chunk => {
+        body += chunk.toString();
+      });
+      
+      req.on('end', async () => {
+        try {
+          const data = JSON.parse(body);
+          const { userId, title, content, subscriptionId } = data;
+          
+          if (!userId || !subscriptionId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: 'Missing required fields',
+              message: 'userId and subscriptionId are required'
+            }));
+            return;
+          }
+          
+          // Create test notification using the service
+          const testNotificationData = {
+            userId,
+            subscriptionId,
+            title: title || 'Service Diagnostic Test',
+            content: content || 'This is a test notification created via the service layer',
+            sourceUrl: '',
+            metadata: {
+              diagnostic: true,
+              source: 'diagnostics-service-endpoint',
+              timestamp: new Date().toISOString()
+            }
+          };
+          
+          // Use the notification service to create the notification
+          const result = await createNotification(testNotificationData);
+          
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            notification: result,
+            timestamp: new Date().toISOString()
+          }));
+        } catch (parseError) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'Invalid request body',
+            message: parseError.message
+          }));
+        }
+      });
+    } catch (error) {
+      console.error('Create notification diagnostics error:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Failed to create test notification',
+        message: error.message
+      }));
+    }
+    return;
+  }
+  
+  // Default response for unknown routes
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    error: 'Not Found',
+    message: `Route ${path} not found`
+  }));
 });
 
 const port = process.env.PORT || 8080;
@@ -254,7 +409,7 @@ async function processMessage(message) {
     if (processor.requiresDatabase && !serviceState.databaseActive) {
       logger.warn('Database connection not established, attempting to connect', {
         processor_type: validatedData.processor_type,
-        connection_state: db.getConnectionState()
+        connection_state: connectionState.isConnected
       });
       
       try {
