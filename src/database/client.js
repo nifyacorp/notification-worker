@@ -223,7 +223,8 @@ export const db = {
     let attempts = 0;
     
     while (attempts <= maxRetries) {
-      // Move the start time declaration here so it's accessible in both try and catch blocks
+      // Define start here so it's accessible in both try and catch blocks
+      // This fixes the "start is not defined" ReferenceError in error handling
       const start = Date.now();
       
       try {
