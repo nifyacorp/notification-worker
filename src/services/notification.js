@@ -7,6 +7,9 @@ export async function createNotifications(message) {
   for (const match of message.results.matches) {
     for (const doc of match.documents) {
       try {
+        // Determine the best title to use for the notification
+        const notificationTitle = doc.notification_title || doc.title || 'Notification';
+        
         await db.query(
           `INSERT INTO notifications (
             user_id,
@@ -14,28 +17,38 @@ export async function createNotifications(message) {
             title,
             content,
             source_url,
-            metadata
-          ) VALUES ($1, $2, $3, $4, $5, $6)
+            entity_type,
+            metadata,
+            created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
           RETURNING id`,
           [
             user_id,
             subscription_id,
-            doc.title,
+            notificationTitle,
             doc.summary,
             doc.links.html,
+            `boe:${doc.document_type?.toLowerCase() || 'document'}`,
             JSON.stringify({
               prompt: match.prompt,
               relevance: doc.relevance_score,
               document_type: doc.document_type,
+              original_title: doc.title,
               processor_type: message.processor_type,
+              publication_date: doc.dates?.publication_date,
+              issuing_body: doc.issuing_body,
+              section: doc.section,
+              department: doc.department,
               trace_id: message.trace_id
-            })
+            }),
+            new Date()
           ]
         );
 
         logger.info('Created notification', {
           user_id,
           subscription_id,
+          title: notificationTitle,
           trace_id: message.trace_id,
           document_type: doc.document_type
         });
