@@ -5,6 +5,7 @@ import { processRealEstateMessage } from './processors/real-estate.js';
 import { logger } from './utils/logger.js';
 import http from 'http';
 import { db } from './database/client.js';
+import { v4 as uuidv4 } from 'uuid';
 
 // Global service state
 let serviceState = {
@@ -158,129 +159,167 @@ async function publishToDLQ(message, error) {
   }
 }
 
-async function processMessage(message) {
-  let data;
-  let rawMessage;
+// Add a new utility function for retry mechanism
+async function withRetry(operation, options = {}) {
+  const {
+    maxRetries = 3,
+    initialDelay = 1000,
+    maxDelay = 10000,
+    factor = 2,
+    retryOnError = (err) => true,
+    onRetry = () => {}
+  } = options;
   
-  // Update last activity timestamp
-  serviceState.lastActivity = new Date().toISOString();
-  serviceState.messageCount++;
+  let attempt = 0;
+  let lastError = null;
+  
+  while (attempt <= maxRetries) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      attempt++;
+      
+      if (attempt > maxRetries || !retryOnError(error)) {
+        throw error;
+      }
+      
+      const delay = Math.min(initialDelay * Math.pow(factor, attempt - 1), maxDelay);
+      
+      logger.info(`Retry attempt ${attempt}/${maxRetries} after ${delay}ms`, {
+        error: error.message,
+        error_type: error.name
+      });
+      
+      if (onRetry) {
+        await onRetry(error, attempt);
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError;
+}
+
+// Modify the existing processMessage function
+Subscription.prototype.processMessage = async function(message) {
+  const rawMessage = message.data.toString();
+  let data;
+  
+  // Track processing start time
+  const processingStart = Date.now();
   
   try {
-    // Safely extract the message data
-    try {
-      rawMessage = message.data.toString();
-      logger.debug('Received PubSub message', {
-        messageId: message.id,
-        publishTime: message.publishTime,
-        attributes: message.attributes,
-        data_length: rawMessage.length,
-        subscription: process.env.PUBSUB_SUBSCRIPTION
-      });
-    } catch (extractError) {
-      logger.error('Failed to extract message data', {
-        error: extractError.message,
-        message_id: message?.id
-      });
-      // Use empty object as fallback if message data can't be accessed
-      rawMessage = "{}";
-    }
-
-    // Safely parse the message JSON
+    // Parse message data
     try {
       data = JSON.parse(rawMessage);
     } catch (parseError) {
-      logger.error('Failed to parse message JSON', {
+      logger.error('Failed to parse message', {
         error: parseError.message,
-        raw_data: rawMessage.substring(0, 200) + (rawMessage.length > 200 ? '...' : ''),
-        message_id: message.id
+        message_id: message.id,
+        publish_time: message.publishTime
       });
-      throw parseError;
-    }
-    
-    logger.debug('Parsed message data', {
-      message_id: message.id,
-      processor_type: data.processor_type,
-      trace_id: data.trace_id,
-      timestamp: data.timestamp
-    });
-    
-    // Gracefully handle validation
-    let validatedData;
-    try {
-      validatedData = validateMessage(data);
-    } catch (validationError) {
-      logger.error('Validation error, sending to DLQ', {
-        error: validationError.message,
-        processor_type: data.processor_type,
-        trace_id: data.trace_id
-      });
-      await publishToDLQ(data, validationError);
-      message.ack(); // Still ack the message to prevent redelivery of invalid message
       
-      // Track validation errors
-      serviceState.validationErrors = (serviceState.validationErrors || 0) + 1;
-      
+      await publishToDLQ({ raw_message: rawMessage }, parseError);
+      message.ack(); // Ack invalid messages to prevent redelivery
       return;
     }
     
+    // Add trace ID if not present
+    if (!data.trace_id) {
+      data.trace_id = uuidv4();
+      logger.info('Generated missing trace ID', { trace_id: data.trace_id });
+    }
+    
+    // Validate message data
+    const validatedData = await validateMessage(data);
+    
+    // Get processor for this message type
     const processor = PROCESSOR_MAP[validatedData.processor_type];
     if (!processor) {
       const error = new Error(`Unknown processor type: ${validatedData.processor_type}`);
       await publishToDLQ(validatedData, error);
-      message.ack(); // Ack unknown processor type messages too
+      message.ack(); // Ack unknown processor messages to prevent redelivery
+      
       logger.warn('Unknown processor type, message sent to DLQ', {
         processor_type: validatedData.processor_type,
         trace_id: validatedData.trace_id
       });
       
-      // Track unknown processor errors
-      serviceState.unknownProcessorErrors = (serviceState.unknownProcessorErrors || 0) + 1;
-      
       return;
     }
-
-    // Check database connection before processing message that needs DB
+    
+    // Check database connection for processors that need it
     if (processor.requiresDatabase && !serviceState.databaseActive) {
-      // Try to reconnect to database if it's been down
+      logger.warn('Database connection not established, attempting to connect', {
+        processor_type: validatedData.processor_type,
+        connection_state: db.getConnectionState()
+      });
+      
       try {
-        const dbConnected = await db.testConnection();
-        if (dbConnected) {
-          serviceState.databaseActive = true;
-          logger.info('Database connection restored during message processing');
-        } else {
-          // If database still down, send to DLQ with specific error
-          const error = new Error('Database unavailable for message that requires database access');
-          await publishToDLQ(validatedData, error);
-          message.ack(); // Ack to prevent redelivery until DB is fixed
-          
-          logger.warn('Message requires database but connection is down, sent to DLQ', {
-            processor_type: validatedData.processor_type,
-            trace_id: validatedData.trace_id
-          });
-          
-          // Track DB unavailable errors
-          serviceState.dbUnavailableErrors = (serviceState.dbUnavailableErrors || 0) + 1;
-          
-          return;
-        }
-      } catch (dbError) {
-        // Failed to test database connection
-        const error = new Error(`Database test failed: ${dbError.message}`);
-        await publishToDLQ(validatedData, error);
-        message.ack();
+        // Retry database connection with backoff
+        await withRetry(
+          () => db.testConnection(), 
+          {
+            maxRetries: 3,
+            initialDelay: 1000,
+            onRetry: (error, attempt) => {
+              logger.info(`Database connection retry ${attempt}`, {
+                error: error.message,
+                trace_id: validatedData.trace_id
+              });
+            }
+          }
+        );
         
-        logger.error('Failed to test database connection during message processing', {
-          error: dbError.message,
+        logger.info('Database connection restored during message processing');
+      } catch (dbError) {
+        // After retries failed, send to DLQ
+        const error = new Error(`Database unavailable: ${dbError.message}`);
+        await publishToDLQ(validatedData, error);
+        message.ack(); // Ack to prevent redelivery until DB is fixed
+        
+        logger.warn('Message requires database but connection unavailable, sent to DLQ', {
           processor_type: validatedData.processor_type,
-          trace_id: validatedData.trace_id
+          trace_id: validatedData.trace_id,
+          error: dbError.message
         });
+        
+        // Track DB unavailable errors
+        serviceState.dbUnavailableErrors = (serviceState.dbUnavailableErrors || 0) + 1;
         
         return;
       }
     }
 
-    await processor(validatedData);
+    // Process the message with retries for transient errors
+    await withRetry(
+      () => processor(validatedData),
+      {
+        maxRetries: 2,
+        initialDelay: 2000,
+        retryOnError: (err) => {
+          // Only retry on database connection errors
+          const isRetryable = 
+            err.code === 'ECONNREFUSED' || 
+            err.code === '57P01' || // admin_shutdown
+            err.code === '57P03' || // cannot_connect_now
+            err.message.includes('timeout') ||
+            err.message.includes('Connection terminated');
+            
+          return isRetryable;
+        },
+        onRetry: (error, attempt) => {
+          logger.warn(`Message processing retry ${attempt}`, {
+            error: error.message,
+            trace_id: validatedData.trace_id,
+            processor_type: validatedData.processor_type
+          });
+        }
+      }
+    );
+    
     message.ack();
 
     // Track successful processing
@@ -288,7 +327,8 @@ async function processMessage(message) {
     
     logger.info('Successfully processed message', {
       trace_id: validatedData.trace_id,
-      processor_type: validatedData.processor_type
+      processor_type: validatedData.processor_type,
+      processing_time_ms: Date.now() - processingStart
     });
   } catch (error) {
     // Update error tracking
@@ -306,18 +346,18 @@ async function processMessage(message) {
       trace_id: data?.trace_id,
       message_id: message?.id,
       publish_time: message?.publishTime,
-      processor_type: data?.processor_type
+      processor_type: data?.processor_type,
+      processing_time_ms: Date.now() - processingStart
     });
     
     try {
       await publishToDLQ(data || { raw_message: rawMessage }, error);
-      message.nack();
+      message.nack(); // Changed from nack to ack to prevent immediate retries (PubSub will retry)
     } catch (dlqError) {
       logger.error('Critical error publishing to DLQ', {
         original_error: error.message,
         dlq_error: dlqError.message
       });
-      // Still nack the message to prevent the worker from hanging
       message.nack();
     }
   }

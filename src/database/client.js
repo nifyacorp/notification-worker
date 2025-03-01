@@ -14,7 +14,9 @@ const connectionState = {
   initCount: 0,
   lastErrorMessage: null,
   isInitializing: false,
-  isConnected: false
+  isConnected: false,
+  lastSuccessTime: null,
+  lastErrorTime: null
 };
 
 const secretManagerClient = new SecretManagerServiceClient();
@@ -36,47 +38,65 @@ async function getSecret(secretName) {
 
 async function createPoolConfig() {
   try {
+    // For local development, check if we can use environment variables
+    if (process.env.NODE_ENV !== 'production' && 
+        process.env.DB_USER && 
+        process.env.DB_PASSWORD && 
+        process.env.DB_NAME) {
+      
+      logger.info('Using database credentials from environment variables');
+      
+      const config = {
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+        host: process.env.DB_HOST || 'localhost',
+        port: process.env.DB_PORT || 5432,
+        max: 5,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 5000
+      };
+      
+      return config;
+    }
+    
+    // Otherwise retrieve from Secret Manager
     const [dbName, dbUser, dbPassword] = await Promise.all([
       getSecret('DB_NAME'),
       getSecret('DB_USER'),
       getSecret('DB_PASSWORD')
     ]);
 
-    const config = {
-      user: dbUser,
-      password: dbPassword,
-      database: dbName,
-      ...(process.env.NODE_ENV === 'production' ? {
+    // Simplified configuration based on backend approach
+    const config = process.env.NODE_ENV === 'production' 
+      ? {
+        user: dbUser,
+        password: dbPassword,
+        database: dbName,
         host: `/cloudsql/${INSTANCE_CONNECTION_NAME}`,
-        max: 10, // Reduced from 20 to prevent connection saturation
-        min: 0, // Explicitly set min connections
+        max: 10,
+        min: 1, // Always keep at least one connection
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 10000, // Increased from 5000
+        connectionTimeoutMillis: 15000, // Increased from 10000
         application_name: 'notification-worker',
-        statement_timeout: 15000, // Increased from 10000
-        query_timeout: 15000, // Increased from 10000
-        keepalive: true,
-        keepaliveInitialDelayMillis: 5000, // Reduced from 10000
-        // Add more reliable connection handling
-        allowExitOnIdle: false,
-        connectionRetryInterval: 1000
-      } : {
+        keepalive: true
+      } 
+      : {
+        user: dbUser,
+        password: dbPassword,
+        database: dbName,
         host: 'localhost',
         port: 5432,
         max: 5,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 5000
-      })
-    };
+      };
 
     logger.info('Database connection configuration', {
       host: config.host,
       database: config.database,
       user: config.user,
       max: config.max,
-      min: config.min,
-      idleTimeoutMillis: config.idleTimeoutMillis,
-      connectionTimeoutMillis: config.connectionTimeoutMillis,
       environment: process.env.NODE_ENV
     });
 
@@ -108,72 +128,33 @@ async function testConnection(pool, retryCount = 0) {
     const timeout = setTimeout(() => {
       logger.error('Database connection test timeout reached', {
         retry_count: retryCount,
-        timeout_ms: 8000,
+        timeout_ms: 10000, // Increased from 8000
         connection_state: connectionState
       });
       throw new Error('Database connection test timeout');
-    }, 8000); // 8 second timeout for test
+    }, 10000); // Increased timeout
 
     try {
-      // Get a client from the pool with explicit timeout
+      // Get a client from the pool with explicit timeout - simplified approach
       logger.debug('Attempting to acquire client from pool');
-      const clientAcquisitionStart = Date.now();
+      const client = await pool.connect();
       
-      const client = await Promise.race([
-        pool.connect(),
-        new Promise((_, reject) => 
-          setTimeout(() => {
-            logger.error('Client acquisition timeout', {
-              timeout_ms: 5000,
-              retry_count: retryCount,
-              connection_state: connectionState
-            });
-            reject(new Error('Client acquisition timeout'));
-          }, 5000)
-        )
-      ]);
-      
-      logger.debug('Successfully acquired client from pool', {
-        duration_ms: Date.now() - clientAcquisitionStart
-      });
-      
-      const startTime = Date.now();
-      
-      // Execute a simple query that shouldn't take long
+      // Execute a simple query
       logger.debug('Executing simple test query');
       const result = await client.query('SELECT 1 as connection_test');
       
-      // Only if that succeeds, try the more expensive queries
+      // Simple validation
       if (result.rows[0].connection_test === 1) {
-        logger.debug('Simple test query succeeded, running diagnostic queries');
-        const [versionResult, tablesResult] = await Promise.all([
-          client.query('SELECT version()'),
-          client.query(`
-            SELECT table_name, 
-                  (SELECT count(*) FROM information_schema.columns WHERE table_name = t.table_name) as column_count
-            FROM information_schema.tables t
-            WHERE table_schema = 'public'
-            LIMIT 10
-          `)
-        ]);
-        
-        const duration = Date.now() - startTime;
-        
-        logger.info({
-          phase: 'connection_test_success',
-          pgVersion: versionResult.rows[0]?.version,
-          tableCount: tablesResult.rows?.length,
-          tables: tablesResult.rows.map(r => r.table_name),
-          duration_ms: duration,
-          retry_count: retryCount,
-          connection_state: {
-            ...connectionState,
-            connection_test_duration_ms: duration
+        logger.info('Database connection successful', {
+          pool_stats: {
+            totalCount: pool.totalCount,
+            idleCount: pool.idleCount,
+            waitingCount: pool.waitingCount
           }
-        }, 'Database connection successful');
+        });
       }
       
-      logger.debug('Releasing client back to pool');
+      // Release client
       client.release();
       clearTimeout(timeout);
       
@@ -201,9 +182,9 @@ async function testConnection(pool, retryCount = 0) {
       connection_state: connectionState
     });
     
-    // Retry up to 2 times with exponential backoff
-    if (retryCount < 2) {
-      const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s
+    // Retry with exponential backoff
+    if (retryCount < 3) { // Increased max retries
+      const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
       logger.info(`Retrying database connection in ${delay}ms`, { retry_count: retryCount + 1 });
       await new Promise(resolve => setTimeout(resolve, delay));
       return testConnection(pool, retryCount + 1);
@@ -218,7 +199,7 @@ let pool;
 export const db = {
   // Enhanced query method with retries for connection issues
   query: async (text, params, queryOptions = {}) => {
-    const maxRetries = queryOptions.maxRetries || 1;
+    const maxRetries = queryOptions.maxRetries || 2; // Increased from 1
     const retryDelay = queryOptions.retryDelay || 1000;
     let attempts = 0;
     
@@ -232,19 +213,27 @@ export const db = {
           pool = await initializePool();
         }
         
-        // Remove the old declaration since we moved it outside
-        const result = await pool.query(text, params);
-        const duration = Date.now() - start;
+        // Directly get a client for better control
+        const client = await pool.connect();
         
-        logger.debug('Query executed successfully', {
-          text: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
-          duration,
-          rows: result.rowCount,
-          command: result.command,
-          attempt: attempts + 1
-        });
-        
-        return result;
+        try {
+          // Execute query
+          const result = await client.query(text, params);
+          const duration = Date.now() - start;
+          
+          logger.debug('Query executed successfully', {
+            text: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
+            duration,
+            rows: result.rowCount,
+            command: result.command,
+            attempt: attempts + 1
+          });
+          
+          return result;
+        } finally {
+          // Always release client back to pool
+          client.release();
+        }
       } catch (error) {
         attempts++;
         const isConnectionError = 
@@ -257,7 +246,7 @@ export const db = {
         logger.error('Query failed', {
           error: error.message,
           error_code: error.code,
-          stack: error.stack.substring(0, 500),
+          stack: error.stack?.substring(0, 500) || 'No stack trace',
           severity: error.severity,
           detail: error.detail,
           text: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
@@ -270,7 +259,7 @@ export const db = {
         if (isConnectionError && attempts <= maxRetries) {
           // For connection errors, try to reinitialize the pool
           try {
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            await new Promise(resolve => setTimeout(resolve, retryDelay * attempts)); // Progressive backoff
             logger.info('Reinitializing pool after connection error', { attempt: attempts });
             connectionState.isConnected = false;
             pool = await initializePool();
@@ -279,6 +268,10 @@ export const db = {
               error: initError.message
             });
           }
+        } else if (attempts <= maxRetries) {
+          // For non-connection errors, wait before retry
+          await new Promise(resolve => setTimeout(resolve, retryDelay * attempts));
+          logger.info('Retrying query after error', { attempt: attempts });
         } else {
           throw error;
         }
@@ -291,8 +284,8 @@ export const db = {
     if (connectionState.isInitializing) {
       logger.info('Pool initialization already in progress, waiting');
       
-      // Wait for existing initialization to complete (max 10 seconds)
-      for (let i = 0; i < 10; i++) {
+      // Wait for existing initialization to complete (max 15 seconds)
+      for (let i = 0; i < 15; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         if (!connectionState.isInitializing) {
           logger.info('Existing pool initialization completed');
@@ -381,6 +374,7 @@ export async function initializePool() {
     
     pool = new Pool(config);
     
+    // Add more robust error handling
     pool.on('error', (error) => {
       logger.error('Unexpected database pool error', {
         error: error.message,
@@ -391,6 +385,24 @@ export async function initializePool() {
       connectionState.isConnected = false;
       connectionState.lastErrorMessage = error.message;
       connectionState.lastErrorTime = new Date().toISOString();
+      
+      // If totally disconnected, try to reconnect
+      if (pool.totalCount === 0) {
+        logger.warn('No connections in pool, attempting to reinitialize');
+        setTimeout(() => {
+          try {
+            initializePool().catch(err => {
+              logger.error('Failed auto-reconnect after pool error', {
+                error: err.message
+              });
+            });
+          } catch (err) {
+            logger.error('Error during auto-reconnect attempt', {
+              error: err.message
+            });
+          }
+        }, 5000);
+      }
     });
     
     pool.on('connect', (client) => {
