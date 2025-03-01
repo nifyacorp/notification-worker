@@ -20,6 +20,9 @@ export async function createNotifications(message) {
         // Determine the best title to use for the notification
         const notificationTitle = doc.notification_title || doc.title || 'Notification';
         
+        // Create entity_type for metadata
+        const entityType = `boe:${doc.document_type?.toLowerCase() || 'document'}`;
+        
         // Retry up to 3 times with exponential backoff
         let attempt = 0;
         const maxAttempts = 3;
@@ -34,10 +37,9 @@ export async function createNotifications(message) {
                 title,
                 content,
                 source_url,
-                entity_type,
                 metadata,
                 created_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7)
               RETURNING id`,
               [
                 user_id,
@@ -45,8 +47,8 @@ export async function createNotifications(message) {
                 notificationTitle,
                 doc.summary,
                 doc.links?.html || '',
-                `boe:${doc.document_type?.toLowerCase() || 'document'}`,
                 JSON.stringify({
+                  entity_type: entityType,
                   prompt: match.prompt,
                   relevance: doc.relevance_score,
                   document_type: doc.document_type,
@@ -69,6 +71,7 @@ export async function createNotifications(message) {
               notification_id: result.rows[0]?.id,
               title: notificationTitle,
               document_type: doc.document_type,
+              entity_type: entityType,
               attempt: attempt + 1,
               trace_id: message.trace_id
             });
