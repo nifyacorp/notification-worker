@@ -29,6 +29,13 @@ A Cloud Run service that processes notifications from various content processors
   - `pino` - Logging
   - `zod` - Schema validation
 
+## 🌐 Deployment Information
+
+### Notification Worker Service
+- **URL**: `https://notification-worker-415554190254.us-central1.run.app`
+- **Service Name**: `notification-worker`
+- **Region**: `us-central1`
+
 ## 📋 Prerequisites
 
 - Google Cloud project with:
