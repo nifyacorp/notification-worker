@@ -6,7 +6,7 @@ import { logger } from './utils/logger.js';
 import http from 'http';
 import { db, connectionState, query } from './database/client.js';
 import { v4 as uuidv4 } from 'uuid';
-import { createNotification } from './services/notification.js';
+import { createNotification, createNotifications } from './services/notification.js';
 import { processMessage } from './process.js';
 import url from 'url';
 
@@ -105,24 +105,58 @@ const server = http.createServer(async (req, res) => {
         isConnected: connectionState.isConnected,
         lastConnectAttempt: connectionState.lastConnectAttempt,
         failedAttempts: connectionState.failedAttempts,
-        connectionHistory: connectionState.connectionHistory.slice(-5) // Last 5 connection events
+        connectionHistory: connectionState.connectionHistory?.slice(-5) || [] // Last 5 connection events
       };
       
       // Diagnostic queries
       let notificationCount = null;
       let databaseRole = null;
       let testNotificationResult = null;
+      let rlsPolicies = null;
+      let rlsEnabled = null;
+      let appUserIdSetting = null;
       
       // Only run these if we're connected
       if (connectionState.isConnected) {
         try {
-          // Try to count notifications for user
-          const countResult = await query('SELECT COUNT(*) FROM notifications WHERE user_id = $1', [userId]);
-          notificationCount = parseInt(countResult.rows[0].count, 10);
-          
           // Check current database role
           const roleResult = await query('SELECT current_user, current_database()');
           databaseRole = roleResult.rows[0];
+          
+          // Check if RLS is enabled on notifications table
+          const rlsResult = await query(`
+            SELECT relname, relrowsecurity 
+            FROM pg_class 
+            WHERE relname = 'notifications'
+          `);
+          rlsEnabled = rlsResult.rows[0]?.relrowsecurity === true;
+          
+          // Get RLS policies on notifications table
+          const policiesResult = await query(`
+            SELECT * FROM pg_policies 
+            WHERE tablename = 'notifications'
+          `);
+          rlsPolicies = policiesResult.rows;
+          
+          // Check app.current_user_id setting
+          try {
+            const settingResult = await query(`SELECT current_setting('app.current_user_id', TRUE) as app_user_id`);
+            appUserIdSetting = settingResult.rows[0]?.app_user_id;
+          } catch (settingError) {
+            appUserIdSetting = null;
+          }
+          
+          // Try to set the user ID for RLS
+          try {
+            await query('SET LOCAL app.current_user_id = $1', [userId]);
+            logger.info('Set app.current_user_id for RLS', { userId });
+          } catch (setError) {
+            logger.warn('Failed to set app.current_user_id', { error: setError.message });
+          }
+          
+          // Try to count notifications for user
+          const countResult = await query('SELECT COUNT(*) FROM notifications WHERE user_id = $1', [userId]);
+          notificationCount = parseInt(countResult.rows[0].count, 10);
           
           // Try to create a test notification
           const testNotification = {
@@ -159,6 +193,16 @@ const server = http.createServer(async (req, res) => {
               success: true,
               notification_id: insertResult.rows[0].id
             };
+            
+            // Try to read back the notification we just created to test RLS
+            const readBackResult = await query(
+              `SELECT * FROM notifications WHERE id = $1`,
+              [insertResult.rows[0].id]
+            );
+            
+            testNotificationResult.read_back_success = readBackResult.rowCount > 0;
+            testNotificationResult.read_back_count = readBackResult.rowCount;
+            
           } catch (insertError) {
             testNotificationResult = {
               success: false,
@@ -192,6 +236,9 @@ const server = http.createServer(async (req, res) => {
           user_id: userId,
           notification_count: notificationCount,
           database_role: databaseRole,
+          rls_enabled: rlsEnabled,
+          rls_policies: rlsPolicies,
+          app_user_id_setting: appUserIdSetting,
           test_notification: testNotificationResult
         },
         environment: envVars
@@ -231,7 +278,7 @@ const server = http.createServer(async (req, res) => {
             return;
           }
           
-          // Create test notification using the service
+          // Create test notification using the service with RLS context
           const testNotificationData = {
             userId,
             subscriptionId,
@@ -245,13 +292,41 @@ const server = http.createServer(async (req, res) => {
             }
           };
           
-          // Use the notification service to create the notification
+          // Use the notification service to create the notification with RLS context
           const result = await createNotification(testNotificationData);
+          
+          // Try to read back the notification to verify RLS is working
+          let readBackResult = null;
+          try {
+            const readResult = await db.withRLSContext(userId, async (client) => {
+              return client.query('SELECT * FROM notifications WHERE id = $1', [result.id]);
+            });
+            
+            if (readResult.rowCount > 0) {
+              readBackResult = {
+                success: true,
+                notification_id: readResult.rows[0].id,
+                title: readResult.rows[0].title,
+                created_at: readResult.rows[0].created_at
+              };
+            } else {
+              readBackResult = {
+                success: false,
+                message: 'Notification created but could not be read back with RLS context'
+              };
+            }
+          } catch (readError) {
+            readBackResult = {
+              success: false,
+              error: readError.message
+            };
+          }
           
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
             success: true,
             notification: result,
+            read_back_test: readBackResult,
             timestamp: new Date().toISOString()
           }));
         } catch (parseError) {

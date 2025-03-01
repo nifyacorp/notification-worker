@@ -290,6 +290,64 @@ export const db = {
     }
   },
   
+  /**
+   * Sets the RLS context for a database session
+   * @param {string} userId - The user ID to set for RLS
+   * @returns {Promise<boolean>} - Whether the operation was successful
+   */
+  setRLSContext: async (userId) => {
+    if (!userId) {
+      logger.warn('Cannot set RLS context: missing userId');
+      return false;
+    }
+    
+    try {
+      await db.query('SET LOCAL app.current_user_id = $1', [userId]);
+      logger.debug('Set RLS context for user', { userId });
+      return true;
+    } catch (error) {
+      logger.warn('Failed to set RLS context', {
+        error: error.message,
+        userId
+      });
+      return false;
+    }
+  },
+  
+  /**
+   * Executes a function within a transaction with RLS context set
+   * @param {string} userId - The user ID to set for RLS
+   * @param {Function} callback - Function to execute within the transaction
+   * @returns {Promise<any>} - Result of the callback function
+   */
+  withRLSContext: async (userId, callback) => {
+    if (!pool) {
+      pool = await initializePool();
+    }
+    
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Set RLS context
+      if (userId) {
+        await client.query('SET LOCAL app.current_user_id = $1', [userId]);
+      }
+      
+      // Execute the callback with the client
+      const result = await callback(client);
+      
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+  
   testConnection: async () => {
     // If already initializing, wait for that to complete instead of starting another init
     if (connectionState.isInitializing) {
