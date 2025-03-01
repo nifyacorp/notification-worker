@@ -202,8 +202,8 @@ async function withRetry(operation, options = {}) {
   throw lastError;
 }
 
-// Modify the existing processMessage function
-Subscription.prototype.processMessage = async function(message) {
+// Define the processMessage function correctly instead of trying to extend Subscription.prototype
+async function processMessage(message) {
   const rawMessage = message.data.toString();
   let data;
   
@@ -363,149 +363,211 @@ Subscription.prototype.processMessage = async function(message) {
   }
 }
 
-// Safely set up subscription listeners
-function setupSubscriptionListeners() {
+/**
+ * Sets up PubSub subscription event listeners
+ */
+async function setupSubscriptionListeners() {
   if (!subscription) {
-    logger.warn('Cannot set up subscription listeners - subscription not initialized');
+    logger.warn('Cannot set up subscription listeners - subscription is not initialized');
     return false;
   }
-
+  
   try {
-    // Check if subscription exists
+    logger.info('Setting up PubSub subscription listeners', {
+      subscription_name: subscription.name
+    });
+    
+    // Remove any existing listeners to prevent duplicates
+    subscription.removeAllListeners('message');
+    subscription.removeAllListeners('error');
+    
+    // Set up message handler
     subscription.on('message', processMessage);
-
+    
+    // Set up error handler
     subscription.on('error', (error) => {
-      logger.error('Subscription error', {
+      logger.error('PubSub subscription error', {
         error: error.message,
-        stack: error.stack,
         code: error.code,
         details: error.details,
-        subscription: process.env.PUBSUB_SUBSCRIPTION,
-        project: process.env.GOOGLE_CLOUD_PROJECT
+        stack: error.stack
       });
       
       // Update service state
       serviceState.subscriptionActive = false;
-      serviceState.errors.push(`Subscription error: ${error.message}`);
+      
+      // Try to recover by reinitializing after a delay
+      setTimeout(async () => {
+        logger.info('Attempting to recover from PubSub subscription error');
+        try {
+          // Check if subscription still exists
+          const [exists] = await subscription.exists();
+          if (exists) {
+            // Reinitialize subscription listeners
+            const result = await setupSubscriptionListeners();
+            if (result) {
+              logger.info('Successfully recovered from PubSub subscription error');
+              serviceState.subscriptionActive = true;
+              return;
+            }
+          }
+          
+          // If we reach here, recovery failed
+          logger.warn('Failed to recover from PubSub subscription error, will retry');
+        } catch (recoverError) {
+          logger.error('Error during PubSub subscription recovery', {
+            error: recoverError.message,
+            stack: recoverError.stack
+          });
+        }
+      }, 30000); // Wait 30 seconds before retrying
     });
     
+    logger.info('PubSub subscription listeners set up successfully');
+    serviceState.subscriptionActive = true;
     return true;
   } catch (error) {
-    logger.error('Failed to set up subscription listeners', {
+    logger.error('Failed to set up PubSub subscription listeners', {
       error: error.message,
       stack: error.stack
     });
-    serviceState.errors.push(`Subscription setup: ${error.message}`);
+    serviceState.subscriptionActive = false;
     return false;
   }
 }
 
 // Initialize all services with enhanced error handling
 async function initializeServices() {
-  logger.info('Starting service initialization', {
-    env: {
-      GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
-      PUBSUB_SUBSCRIPTION: process.env.PUBSUB_SUBSCRIPTION,
-      DLQ_TOPIC: process.env.DLQ_TOPIC,
-      NODE_ENV: process.env.NODE_ENV
-    }
+  logger.info('Initializing services for notification-worker', {
+    environment: process.env.NODE_ENV,
+    version: process.env.npm_package_version || 'unknown',
+    pubsub_project: process.env.GOOGLE_CLOUD_PROJECT,
+    pubsub_subscription: process.env.PUBSUB_SUBSCRIPTION,
+    operating_mode: serviceState.operatingMode
   });
-  
-  // First update state to show we're initializing but operational
-  serviceState.operatingMode = 'initializing';
-  
-  // Test database connection with timeout and retry
+
+  // Test database connection first with timeout
   logger.info('Testing database connection');
+  let dbConnected = false;
+  
   try {
-    await Promise.race([
+    const connectionResult = await Promise.race([
       db.testConnection(),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Database connection timeout during initialization')), 10000)
+        setTimeout(() => reject(new Error('Database connection test timeout')), 15000)
       )
     ]);
-    logger.info('Database connection successful');
-    serviceState.dbConnected = true;
+    
+    logger.info('Database connection successful', { result: connectionResult });
+    dbConnected = true;
     serviceState.databaseActive = true;
   } catch (error) {
-    logger.error('Database connection failed, continuing in limited mode', {
+    logger.error('Database connection failed', {
       error: error.message,
       stack: error.stack
     });
-    serviceState.errors.push(`Database connection: ${error.message}`);
-    serviceState.dbConnected = false;
     serviceState.databaseActive = false;
+    
+    // Retry database connection one more time after a delay
+    logger.info('Retrying database connection after 5 second delay');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    try {
+      const retryResult = await Promise.race([
+        db.testConnection(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Database retry connection test timeout')), 15000)
+        )
+      ]);
+      
+      logger.info('Database retry connection successful', { result: retryResult });
+      dbConnected = true;
+      serviceState.databaseActive = true;
+    } catch (retryError) {
+      logger.error('Database retry connection failed, proceeding in limited mode', {
+        error: retryError.message,
+        stack: retryError.stack
+      });
+      serviceState.databaseActive = false;
+    }
   }
-  
-  // Test PubSub subscription existence
-  if (subscription) {
-    logger.info('Testing PubSub subscription existence', {
+
+  // Check subscription existence
+  let subscriptionExists = false;
+  try {
+    if (!pubsub) {
+      logger.info('Initializing PubSub client');
+      pubsub = new PubSub({
+        projectId: process.env.GOOGLE_CLOUD_PROJECT,
+      });
+    }
+
+    logger.info('Verifying PubSub subscription existence', {
       subscription: process.env.PUBSUB_SUBSCRIPTION,
       project: process.env.GOOGLE_CLOUD_PROJECT
     });
+
+    // Verify the subscription exists
+    const [subscriptions] = await pubsub.getSubscriptions();
+    const subscriptionNames = subscriptions.map(s => s.name);
+    const fullSubscriptionName = `projects/${process.env.GOOGLE_CLOUD_PROJECT}/subscriptions/${process.env.PUBSUB_SUBSCRIPTION}`;
     
-    try {
-      const [exists] = await subscription.exists();
-      if (!exists) {
-        throw new Error(`PubSub subscription '${process.env.PUBSUB_SUBSCRIPTION}' does not exist in project '${process.env.GOOGLE_CLOUD_PROJECT}'`);
-      }
+    subscriptionExists = subscriptionNames.includes(fullSubscriptionName);
+    
+    if (subscriptionExists) {
+      logger.info('PubSub subscription exists', { subscription: process.env.PUBSUB_SUBSCRIPTION });
       
-      logger.info('PubSub subscription verified', {
-        subscription: process.env.PUBSUB_SUBSCRIPTION,
-        project: process.env.GOOGLE_CLOUD_PROJECT
-      });
+      // Initialize the subscription client
+      subscription = pubsub.subscription(process.env.PUBSUB_SUBSCRIPTION);
       
-      // Set up subscription listeners only if the subscription exists
-      if (setupSubscriptionListeners()) {
-        serviceState.pubsubConnected = true;
-        serviceState.subscriptionActive = true;
+      // Set up subscription listeners
+      const listenersSetup = await setupSubscriptionListeners();
+      
+      if (listenersSetup) {
+        logger.info('PubSub subscription listeners set up successfully');
         serviceState.pubsubActive = true;
+      } else {
+        logger.error('Failed to set up PubSub subscription listeners');
+        serviceState.pubsubActive = false;
       }
-    } catch (error) {
-      logger.error('PubSub subscription verification failed, continuing in limited mode', {
-        error: error.message,
-        stack: error.stack,
+    } else {
+      logger.error('PubSub subscription does not exist', {
         subscription: process.env.PUBSUB_SUBSCRIPTION,
-        project: process.env.GOOGLE_CLOUD_PROJECT
+        available_subscriptions: subscriptionNames
       });
-      serviceState.errors.push(`PubSub verification: ${error.message}`);
-      serviceState.pubsubConnected = false;
-      serviceState.subscriptionActive = false;
       serviceState.pubsubActive = false;
     }
-  } else {
-    logger.warn('PubSub subscription client not initialized, skipping verification');
-    serviceState.pubsubConnected = false;
-    serviceState.subscriptionActive = false;
+  } catch (error) {
+    logger.error('Error verifying PubSub subscription', {
+      error: error.message,
+      stack: error.stack
+    });
     serviceState.pubsubActive = false;
   }
-  
-  // Report final initialization status
-  const services = [];
-  if (serviceState.dbConnected) services.push('database');
-  if (serviceState.pubsubConnected) services.push('pubsub');
-  if (serviceState.subscriptionActive) services.push('subscription');
-  
-  if (services.length > 0) {
-    logger.info(`Service initialized successfully with: ${services.join(', ')}`);
-    serviceState.ready = true;
-    
-    if (services.includes('database') && services.includes('pubsub')) {
-      serviceState.operatingMode = 'full';
-    } else if (services.includes('pubsub')) {
-      serviceState.operatingMode = 'limited';
-    } else if (services.includes('database')) {
-      serviceState.operatingMode = 'database-only';
-    } else {
-      serviceState.operatingMode = 'health-only';
-    }
-    
-    return true;
-  } else {
-    logger.warn('Service running in minimal mode - only health endpoint available');
-    serviceState.operatingMode = 'health-only';
-    serviceState.ready = false; // Not fully ready, but health endpoint works
-    return false;
+
+  // Pubsub client available but subscription not initialized
+  if (!subscription) {
+    logger.warn('PubSub subscription client not initialized');
+    serviceState.subscriptionActive = false;
   }
+
+  // Determine operating mode based on what's connected
+  if (serviceState.databaseActive && serviceState.pubsubActive && serviceState.subscriptionActive) {
+    serviceState.operatingMode = 'full';
+    logger.info('Notification worker operating in FULL mode - all services connected');
+  } else if (serviceState.databaseActive || (serviceState.pubsubActive && serviceState.subscriptionActive)) {
+    serviceState.operatingMode = 'limited';
+    logger.warn('Notification worker operating in LIMITED mode', {
+      database_connected: serviceState.databaseActive,
+      pubsub_connected: serviceState.pubsubActive,
+      subscription_active: serviceState.subscriptionActive
+    });
+  } else {
+    serviceState.operatingMode = 'minimal';
+    logger.error('Notification worker operating in MINIMAL mode - only health endpoint available');
+  }
+
+  return serviceState;
 }
 
 process.on('SIGTERM', async () => {
@@ -522,10 +584,10 @@ try {
   await initializeServices();
   
   logger.info('Notification worker started', {
-    mode: serviceState.dbConnected && serviceState.pubsubConnected ? 'full' : 'limited',
+    mode: serviceState.databaseActive && serviceState.pubsubActive ? 'full' : 'limited',
     services_available: {
-      database: serviceState.dbConnected,
-      pubsub: serviceState.pubsubConnected,
+      database: serviceState.databaseActive,
+      pubsub: serviceState.pubsubActive,
       subscription: serviceState.subscriptionActive
     },
     config: {

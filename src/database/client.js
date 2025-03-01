@@ -77,9 +77,19 @@ async function createPoolConfig() {
         max: 10,
         min: 1, // Always keep at least one connection
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 15000, // Increased from 10000
+        connectionTimeoutMillis: 30000, // Increased timeout for cloud SQL connections
         application_name: 'notification-worker',
-        keepalive: true
+        keepalive: true,
+        statement_timeout: 60000, // Add statement timeout
+        query_timeout: 60000, // Add query timeout
+        // Add connection error handler
+        on_error: (err, client) => {
+          logger.error('Unexpected database error on client', {
+            error: err.message,
+            code: err.code,
+            severity: err.severity || 'unknown'
+          });
+        }
       } 
       : {
         user: dbUser,
@@ -89,7 +99,8 @@ async function createPoolConfig() {
         port: 5432,
         max: 5,
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 5000
+        connectionTimeoutMillis: 10000, // Increased from 5000
+        keepalive: true
       };
 
     logger.info('Database connection configuration', {
@@ -329,106 +340,270 @@ export const db = {
 };
 
 export async function initializePool() {
-  // Set the initialization flag to prevent parallel attempts
+  // Prevent multiple simultaneous initialization attempts
+  if (connectionState.isInitializing) {
+    logger.info('Pool initialization already in progress, waiting...');
+    
+    // Wait for current initialization to complete with timeout
+    let waitTime = 0;
+    const interval = 100;
+    const maxWait = 10000;
+    
+    while (connectionState.isInitializing && waitTime < maxWait) {
+      await new Promise(resolve => setTimeout(resolve, interval));
+      waitTime += interval;
+    }
+    
+    // If we waited and the connection is now ready, return the pool
+    if (connectionState.isConnected && pool) {
+      return pool;
+    }
+    
+    // If we waited but initialization is still ongoing, throw an error
+    if (connectionState.isInitializing) {
+      throw new Error('Timed out waiting for ongoing pool initialization');
+    }
+  }
+  
+  // Mark as initializing
   connectionState.isInitializing = true;
-  connectionState.initCount++;
   connectionState.lastInitTime = new Date().toISOString();
+  connectionState.initCount++;
   
   try {
     logger.info('Initializing database pool', {
-      init_count: connectionState.initCount,
-      existing_pool: !!pool,
-      connection_state: connectionState
+      attempt: connectionState.initCount,
+      previous_error: connectionState.lastErrorMessage || 'none'
     });
     
+    // Create pool config and initialize pool
     const config = await createPoolConfig();
+    const newPool = new Pool(config);
+
+    // Test the connection before returning
+    const client = await Promise.race([
+      newPool.connect(),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Connection timeout during pool initialization')), 15000)
+      )
+    ]);
     
-    // If there's an existing pool, end it properly before creating a new one
-    if (pool) {
-      try {
-        logger.info('Ending existing pool before creating a new one', {
-          pool_stats: {
-            totalCount: pool.totalCount,
-            idleCount: pool.idleCount,
-            waitingCount: pool.waitingCount
+    // Connection successful
+    client.release();
+    
+    // Update connection state
+    connectionState.isConnected = true;
+    connectionState.isInitializing = false;
+    connectionState.lastSuccessTime = new Date().toISOString();
+    connectionState.lastErrorMessage = null;
+    connectionState.lastErrorTime = null;
+    
+    logger.info('Database pool initialized successfully', {
+      host: config.host.includes('/cloudsql') ? 'Cloud SQL' : config.host,
+      database: config.database
+    });
+    
+    // Add event listeners for pool errors
+    newPool.on('error', (err) => {
+      logger.error('Unexpected error on idle client', {
+        error: err.message,
+        code: err.code || 'unknown'
+      });
+      
+      // Update connection state
+      connectionState.isConnected = false;
+      connectionState.lastErrorMessage = err.message;
+      connectionState.lastErrorTime = new Date().toISOString();
+    });
+    
+    // Monitor pool for connection issues
+    newPool.on('connect', (client) => {
+      logger.debug('New database connection established');
+      connectionState.isConnected = true;
+      connectionState.lastSuccessTime = new Date().toISOString();
+    });
+    
+    return newPool;
+  } catch (error) {
+    // Update connection state on failure
+    connectionState.isInitializing = false;
+    connectionState.isConnected = false;
+    connectionState.lastErrorMessage = error.message;
+    connectionState.lastErrorTime = new Date().toISOString();
+    
+    logger.error('Failed to initialize database pool', {
+      error: error.message,
+      code: error.code || 'unknown',
+      stack: error.stack
+    });
+    
+    throw error;
+  }
+}
+
+export async function query(text, params, retryOptions = {}) {
+  // Get retry settings
+  const maxRetries = retryOptions.maxRetries || 2;
+  const retryDelay = retryOptions.retryDelay || 1000;
+  const initialRetryDelay = retryOptions.initialRetryDelay || 500;
+  let attempt = 0;
+  let lastError = null;
+  
+  // Ensure pool exists
+  if (!pool) {
+    logger.info('Database pool not initialized yet, initializing now from query call');
+    try {
+      pool = await initializePool();
+    } catch (error) {
+      logger.error('Failed to initialize pool during query', {
+        error: error.message,
+        query: text.substring(0, 80) + (text.length > 80 ? '...' : ''),
+        retry_attempt: attempt
+      });
+      throw new Error(`Database connection failed: ${error.message}`);
+    }
+  }
+
+  // Retry loop
+  while (attempt <= maxRetries) {
+    const startTime = Date.now();
+    let client = null;
+    
+    try {
+      // If we're not connected, try to initialize
+      if (!connectionState.isConnected) {
+        logger.warn('Database not connected, attempting to reconnect before query', {
+          retry_attempt: attempt,
+          query: text.substring(0, 80) + (text.length > 80 ? '...' : '')
+        });
+        pool = await initializePool();
+      }
+
+      // Get a client from the pool with timeout
+      client = await Promise.race([
+        pool.connect(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout acquiring client from pool')), 10000)
+        )
+      ]);
+      
+      // Execute query with timeout
+      const result = await Promise.race([
+        client.query(text, params),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Query execution timeout')), 30000)
+        )
+      ]);
+      
+      const duration = Date.now() - startTime;
+      
+      // Log query success
+      if (duration > 1000) {
+        logger.info('Slow database query completed', {
+          duration_ms: duration,
+          query: text.substring(0, 80) + (text.length > 80 ? '...' : ''),
+          rows: result.rowCount,
+          retry_attempt: attempt
+        });
+      } else {
+        logger.debug('Database query completed', {
+          duration_ms: duration,
+          query: text.substring(0, 80) + (text.length > 80 ? '...' : ''),
+          rows: result.rowCount
+        });
+      }
+      
+      // Return successful result
+      return result;
+    } catch (error) {
+      lastError = error;
+      const duration = Date.now() - startTime;
+      
+      // Increment attempt counter for next try
+      attempt++;
+      
+      // Categorize error
+      const isConnectionError = 
+        error.code === 'ECONNREFUSED' || 
+        error.code === 'ETIMEDOUT' || 
+        error.code === 'ENOTFOUND' ||
+        error.code === '08003' || // Connection does not exist
+        error.code === '08006' || // Connection failure
+        error.code === '57P01' || // Admin shutdown
+        error.code === '08001' || // Unable to establish connection
+        error.code === '08004' || // Rejected connection
+        error.message.includes('timeout') ||
+        error.message.includes('Connection terminated');
+
+      const isDeadlockError = 
+        error.code === '40P01' || // Deadlock detected
+        error.code === '55P03';   // Lock not available
+
+      const isResourceError =
+        error.code === '53300' || // Too many connections
+        error.code === '53400';   // Configuration limit exceeded
+
+      // Log the error with different levels based on retry status
+      if (attempt <= maxRetries && (isConnectionError || isDeadlockError || isResourceError)) {
+        // Log retryable errors as warnings
+        logger.warn('Database query error, will retry', {
+          error: error.message,
+          code: error.code || 'unknown',
+          severity: error.severity || 'unknown',
+          query: text.substring(0, 80) + (text.length > 80 ? '...' : ''),
+          duration_ms: duration,
+          retry_attempt: attempt,
+          max_retries: maxRetries,
+          is_connection_error: isConnectionError,
+          is_deadlock_error: isDeadlockError,
+          is_resource_error: isResourceError
+        });
+        
+        // Update connection state for connection errors
+        if (isConnectionError) {
+          connectionState.isConnected = false;
+          connectionState.lastErrorMessage = error.message;
+          connectionState.lastErrorTime = new Date().toISOString();
+          
+          // For connection errors, try to reinitialize the pool before retrying
+          try {
+            logger.info('Reinitializing database pool after connection error');
+            pool = await initializePool();
+          } catch (poolError) {
+            logger.error('Failed to reinitialize pool during retry', {
+              error: poolError.message,
+              retry_attempt: attempt
+            });
+            // Continue with retry anyway
           }
+        }
+      } else {
+        // Log terminal errors as errors
+        logger.error('Database query failed', {
+          error: error.message,
+          code: error.code || 'unknown',
+          severity: error.severity || 'unknown',
+          query: text.substring(0, 80) + (text.length > 80 ? '...' : ''),
+          duration_ms: duration,
+          retry_attempt: attempt,
+          max_retries: maxRetries
         });
-        await pool.end();
-      } catch (endError) {
-        logger.warn('Error ending existing pool', { 
-          error: endError.message,
-          stack: endError.stack 
-        });
-        // Continue anyway to create a new pool
+      }
+    } finally {
+      // Always release the client back to the pool if we got one
+      if (client) {
+        client.release();
       }
     }
     
-    // Create new pool
-    logger.info('Creating new database pool with config', {
-      host: config.host.includes('cloudsql') ? 'cloudsql' : config.host,
-      max_connections: config.max,
-      min_connections: config.min,
-      idle_timeout: config.idleTimeoutMillis,
-      connection_timeout: config.connectionTimeoutMillis
-    });
-    
-    pool = new Pool(config);
-    
-    // Add more robust error handling
-    pool.on('error', (error) => {
-      logger.error('Unexpected database pool error', {
-        error: error.message,
-        code: error.code,
-        detail: error.detail,
-        connection_state: connectionState
-      });
-      connectionState.isConnected = false;
-      connectionState.lastErrorMessage = error.message;
-      connectionState.lastErrorTime = new Date().toISOString();
-      
-      // If totally disconnected, try to reconnect
-      if (pool.totalCount === 0) {
-        logger.warn('No connections in pool, attempting to reinitialize');
-        setTimeout(() => {
-          try {
-            initializePool().catch(err => {
-              logger.error('Failed auto-reconnect after pool error', {
-                error: err.message
-              });
-            });
-          } catch (err) {
-            logger.error('Error during auto-reconnect attempt', {
-              error: err.message
-            });
-          }
-        }, 5000);
-      }
-    });
-    
-    pool.on('connect', (client) => {
-      logger.debug('New database connection established');
-    });
-    
-    pool.on('remove', (client) => {
-      logger.debug('Database connection removed from pool');
-    });
-
-    // Test the new pool
-    logger.info('Testing new database pool');
-    await testConnection(pool);
-    
-    return pool;
-  } catch (error) {
-    logger.error('Failed to initialize pool', {
-      error: error.message,
-      code: error.code,
-      stack: error.stack,
-      init_count: connectionState.initCount,
-      connection_state: connectionState
-    });
-    throw error;
-  } finally {
-    // Always clear the initialization flag
-    connectionState.isInitializing = false;
+    // If we're not at max retries yet, wait before trying again
+    // Use exponential backoff for retry delay
+    if (attempt <= maxRetries) {
+      const delay = initialRetryDelay + (attempt * retryDelay);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
+  
+  // If we got here, we've exhausted our retries
+  throw new Error(`Database query failed after ${maxRetries + 1} attempts: ${lastError.message}`);
 }
