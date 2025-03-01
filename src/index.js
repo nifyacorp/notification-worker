@@ -7,7 +7,6 @@ import http from 'http';
 import { db, connectionState, query } from './database/client.js';
 import { v4 as uuidv4 } from 'uuid';
 import { createNotification, createNotifications } from './services/notification.js';
-import { processMessage } from './process.js';
 import url from 'url';
 
 // Global service state
