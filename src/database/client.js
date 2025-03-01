@@ -223,12 +223,15 @@ export const db = {
     let attempts = 0;
     
     while (attempts <= maxRetries) {
+      // Move the start time declaration here so it's accessible in both try and catch blocks
+      const start = Date.now();
+      
       try {
         if (!pool || !connectionState.isConnected) {
           pool = await initializePool();
         }
         
-        const start = Date.now();
+        // Remove the old declaration since we moved it outside
         const result = await pool.query(text, params);
         const duration = Date.now() - start;
         
