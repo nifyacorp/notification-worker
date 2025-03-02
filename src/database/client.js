@@ -9,7 +9,7 @@ const INSTANCE_CONNECTION_NAME = process.env.GOOGLE_CLOUD_PROJECT
   : 'delta-entity-447812-p2:us-central1:nifya-db';
 
 // For tracking connection attempts and history
-const connectionState = {
+export const connectionState = {
   lastInitTime: null,
   initCount: 0,
   lastErrorMessage: null,
