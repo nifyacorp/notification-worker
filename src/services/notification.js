@@ -1,5 +1,19 @@
 import { db } from '../database/client.js';
 import { logger } from '../utils/logger.js';
+import { PubSub } from '@google-cloud/pubsub';
+
+// Initialize PubSub client for email notifications
+const pubsub = new PubSub({
+  projectId: process.env.GOOGLE_CLOUD_PROJECT
+});
+
+// Email notification topics
+const EMAIL_IMMEDIATE_TOPIC = process.env.EMAIL_IMMEDIATE_TOPIC || 'email-notifications-immediate';
+const EMAIL_DAILY_TOPIC = process.env.EMAIL_DAILY_TOPIC || 'email-notifications-daily';
+
+// Get topic references
+const immediateEmailTopic = pubsub.topic(EMAIL_IMMEDIATE_TOPIC);
+const dailyEmailTopic = pubsub.topic(EMAIL_DAILY_TOPIC);
 
 /**
  * Sets the app.current_user_id session variable to bypass RLS policies
@@ -13,7 +27,15 @@ export async function setRLSContext(userId) {
       return false;
     }
     
-    await db.query('SET LOCAL app.current_user_id = $1', [userId]);
+    // Validate that userId is a valid UUID to prevent SQL injection
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(userId)) {
+      logger.warn('Invalid UUID format for RLS context', { userId });
+      return false;
+    }
+
+    // Use a string literal instead of parameterized query for SET LOCAL
+    await db.query(`SET LOCAL app.current_user_id = '${userId}'`, []);
     logger.debug('Set RLS context for user', { userId });
     return true;
   } catch (error) {
@@ -22,6 +44,85 @@ export async function setRLSContext(userId) {
       userId
     });
     return false;
+  }
+}
+
+/**
+ * Checks if a user should receive instant email notifications
+ * @param {string} userId - The user ID to check
+ * @returns {Promise<{shouldSend: boolean, email: string|null}>} - Whether to send instant notification and user's email
+ */
+async function shouldSendInstantEmail(userId) {
+  try {
+    const result = await db.query(`
+      SELECT 
+        email,
+        notification_settings->>'notificationEmail' as notification_email,
+        (notification_settings->>'instantNotifications')::boolean as instant_notifications,
+        email = 'nifyacorp@gmail.com' as is_test_user
+      FROM users
+      WHERE id = $1
+    `, [userId]);
+
+    if (result.rows.length === 0) {
+      return { shouldSend: false, email: null };
+    }
+
+    const user = result.rows[0];
+    const shouldSend = user.instant_notifications || user.is_test_user;
+    const email = user.notification_email || user.email;
+
+    return { shouldSend, email };
+  } catch (error) {
+    logger.error('Error checking if user should receive instant email', {
+      error: error.message,
+      userId
+    });
+    return { shouldSend: false, email: null };
+  }
+}
+
+/**
+ * Publishes a notification to the appropriate email notification topic
+ * @param {Object} notification - The notification data
+ * @param {string} email - The user's email address
+ * @param {boolean} immediate - Whether to send immediately or add to daily digest
+ */
+async function publishEmailNotification(notification, email, immediate) {
+  try {
+    const messageData = {
+      userId: notification.userId,
+      email: email,
+      notification: {
+        id: notification.id,
+        title: notification.title,
+        content: notification.content || '',
+        sourceUrl: notification.sourceUrl || '',
+        subscriptionName: notification.subscriptionName || 'NIFYA Alert',
+      },
+      timestamp: new Date().toISOString()
+    };
+
+    const topic = immediate ? immediateEmailTopic : dailyEmailTopic;
+    const messageBuffer = Buffer.from(JSON.stringify(messageData));
+    
+    const messageId = await topic.publish(messageBuffer);
+    
+    logger.info(`Published notification to ${immediate ? 'immediate' : 'daily'} email topic`, {
+      notification_id: notification.id,
+      user_id: notification.userId,
+      message_id: messageId,
+      email_topic: immediate ? EMAIL_IMMEDIATE_TOPIC : EMAIL_DAILY_TOPIC
+    });
+    
+    return messageId;
+  } catch (error) {
+    logger.error(`Failed to publish to ${immediate ? 'immediate' : 'daily'} email topic`, {
+      error: error.message,
+      notification_id: notification.id,
+      user_id: notification.userId
+    });
+    return null;
   }
 }
 
@@ -71,13 +172,76 @@ export async function createNotification(data) {
       notification_id: result.rows[0]?.id
     });
     
-    return {
+    const notification = {
       id: result.rows[0]?.id,
       userId,
       subscriptionId,
       title,
+      content,
+      sourceUrl,
       created_at: new Date().toISOString()
     };
+
+    // Check if user should receive instant email notification
+    const { shouldSend, email } = await shouldSendInstantEmail(userId);
+    
+    if (shouldSend && email) {
+      // Get subscription name for better email context
+      try {
+        const subResult = await db.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
+        if (subResult.rows.length > 0) {
+          notification.subscriptionName = subResult.rows[0].name;
+        }
+      } catch (error) {
+        logger.warn('Could not retrieve subscription name for email', {
+          error: error.message,
+          subscription_id: subscriptionId
+        });
+      }
+      
+      // Send immediate notification
+      await publishEmailNotification(notification, email, true);
+    } else {
+      // Always add to daily digest queue if user has email notifications enabled
+      try {
+        const userResult = await db.query(`
+          SELECT 
+            (notification_settings->>'emailNotifications')::boolean as email_notifications,
+            notification_settings->>'notificationEmail' as notification_email,
+            email
+          FROM users
+          WHERE id = $1
+        `, [userId]);
+        
+        if (userResult.rows.length > 0 && userResult.rows[0].email_notifications) {
+          const userEmail = userResult.rows[0].notification_email || userResult.rows[0].email;
+          if (userEmail) {
+            // Get subscription name for better email context
+            try {
+              const subResult = await db.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
+              if (subResult.rows.length > 0) {
+                notification.subscriptionName = subResult.rows[0].name;
+              }
+            } catch (error) {
+              logger.warn('Could not retrieve subscription name for email', {
+                error: error.message,
+                subscription_id: subscriptionId
+              });
+            }
+            
+            // Add to daily digest
+            await publishEmailNotification(notification, userEmail, false);
+          }
+        }
+      } catch (error) {
+        logger.error('Error checking user email notification preferences', {
+          error: error.message,
+          user_id: userId
+        });
+      }
+    }
+
+    return notification;
   } catch (error) {
     logger.error('Failed to create notification', {
       error: error.message,
