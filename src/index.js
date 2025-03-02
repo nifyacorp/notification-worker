@@ -68,6 +68,14 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
   const path = parsedUrl.pathname;
   
+  // Add debug logging to help diagnose routing issues
+  logger.debug('Received HTTP request', {
+    method: req.method,
+    path: path,
+    url: req.url,
+    headers: req.headers
+  });
+  
   // Basic health check endpoint
   if (path === '/health') {
     const memoryUsage = process.memoryUsage();
@@ -92,8 +100,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   
-  // Database diagnostics endpoint
+  // Database diagnostics endpoint - fix path matching with normalized path
   if (path === '/diagnostics/database') {
+    logger.info('Processing database diagnostics request', {
+      query_params: parsedUrl.query,
+      headers: req.headers
+    });
+    
     try {
       // Parse query parameters
       const queryParams = parsedUrl.query;
@@ -227,7 +240,9 @@ const server = http.createServer(async (req, res) => {
       
       // Send diagnostics response
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
+      
+      // Log the response before sending
+      const responseData = {
         timestamp: new Date().toISOString(),
         service: 'notification-worker',
         database: dbConnectionStatus,
@@ -241,7 +256,15 @@ const server = http.createServer(async (req, res) => {
           test_notification: testNotificationResult
         },
         environment: envVars
-      }, null, 2));
+      };
+      
+      logger.info('Sending diagnostics response', {
+        success: true,
+        timestamp: responseData.timestamp,
+        database_connected: connectionState.isConnected
+      });
+      
+      res.end(JSON.stringify(responseData, null, 2));
     } catch (error) {
       console.error('Diagnostics endpoint error:', error);
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -348,6 +371,7 @@ const server = http.createServer(async (req, res) => {
   }
   
   // Default response for unknown routes
+  logger.info('Route not found', { path: path, method: req.method });
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     error: 'Not Found',
