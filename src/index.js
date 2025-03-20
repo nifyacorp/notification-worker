@@ -1,5 +1,5 @@
 import { PubSub } from '@google-cloud/pubsub';
-import { validateMessage } from './utils/validation.js';
+import { validateMessage, validateMessageStrict } from './utils/validation.js';
 import { processBOEMessage } from './processors/boe.js';
 import { processRealEstateMessage } from './processors/real-estate.js';
 import { logger } from './utils/logger.js';
@@ -485,8 +485,23 @@ async function processMessage(message) {
       logger.info('Generated missing trace ID', { trace_id: data.trace_id });
     }
     
-    // Validate message data
-    const validatedData = await validateMessage(data);
+    // Validate message data with enhanced validation
+    const validation = await validateMessage(data);
+    
+    // If validation has warnings but data is still usable, log the warnings
+    if (!validation.valid) {
+      logger.warn('Message validation warnings', {
+        processor_type: validation.processorType,
+        trace_id: data.trace_id,
+        errors: validation.errors
+      });
+      
+      // Increment validation error counter
+      serviceState.validationErrors++;
+    }
+    
+    // Use the validated/sanitized data
+    const validatedData = validation.data;
     
     // Get processor for this message type
     const processor = PROCESSOR_MAP[validatedData.processor_type];
@@ -499,6 +514,9 @@ async function processMessage(message) {
         processor_type: validatedData.processor_type,
         trace_id: validatedData.trace_id
       });
+      
+      // Increment unknown processor counter
+      serviceState.unknownProcessorErrors++;
       
       return;
     }
