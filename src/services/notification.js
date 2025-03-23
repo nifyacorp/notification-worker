@@ -298,16 +298,30 @@ export async function createNotifications(message) {
   for (const match of message.results.matches) {
     for (const doc of match.documents) {
       try {
-        // IMPROVED TITLE GENERATION - Generate a more meaningful title
+        // ENHANCED TITLE GENERATION - Generate a more meaningful title
         let notificationTitle = '';
         
+        // Log the available title fields for debugging
+        logger.debug('Notification title generation data:', {
+          notification_title: doc.notification_title,
+          title: doc.title,
+          document_type: doc.document_type,
+          issuing_body: doc.issuing_body,
+          department: doc.department,
+          publication_date: doc.dates?.publication_date
+        });
+        
         // First try to use notification_title field which should be optimized for display
-        if (doc.notification_title && doc.notification_title.length > 3) {
+        if (doc.notification_title && doc.notification_title.length > 3 && 
+            doc.notification_title !== 'string' && !doc.notification_title.includes('notification')) {
           notificationTitle = doc.notification_title;
+          logger.debug('Using notification_title field', { title: notificationTitle });
         }
         // Otherwise try the original title
-        else if (doc.title && doc.title.length > 3) {
+        else if (doc.title && doc.title.length > 3 && 
+                doc.title !== 'string' && !doc.title.includes('notification')) {
           notificationTitle = doc.title;
+          logger.debug('Using title field', { title: notificationTitle });
         }
         // If both are missing, construct a descriptive title from available fields
         else if (doc.document_type) {
@@ -317,13 +331,19 @@ export async function createNotifications(message) {
           const date = doc.dates?.publication_date ? ` (${doc.dates.publication_date})` : '';
           
           notificationTitle = `${docType}${issuer ? ' de ' + issuer : ''}${date}`;
+          logger.debug('Constructed title from document metadata', { title: notificationTitle });
         }
         else {
-          // Last resort - use a generic title but with subscription context
+          // Enhanced last resort - use relevant context from match data
           const subscription = message.processor_type || '';
+          const promptContext = match.prompt && match.prompt.length > 5 ? 
+            `: "${match.prompt.substring(0, 30)}${match.prompt.length > 30 ? '...' : ''}"` : '';
+            
           notificationTitle = subscription 
-            ? `Nueva notificación de ${subscription}` 
-            : 'Nueva notificación BOE';
+            ? `Alerta ${subscription}${promptContext}` 
+            : `Alerta BOE${promptContext}`;
+            
+          logger.debug('Using fallback title with context', { title: notificationTitle });
         }
         
         // Create entity_type for metadata
