@@ -302,7 +302,9 @@ export const db = {
     }
     
     try {
-      await db.query('SET LOCAL app.current_user_id = $1', [userId]);
+      // PostgreSQL doesn't support parameters in SET LOCAL commands
+      // Use string interpolation with validated UUID
+      await db.query(`SET LOCAL app.current_user_id = '${userId}'`, []);
       logger.debug('Set RLS context for user', { userId });
       return true;
     } catch (error) {
@@ -332,7 +334,8 @@ export const db = {
       
       // Set RLS context
       if (userId) {
-        await client.query('SET LOCAL app.current_user_id = $1', [userId]);
+        // PostgreSQL doesn't support parameters in SET LOCAL commands
+        await client.query(`SET LOCAL app.current_user_id = '${userId}'`, []);
       }
       
       // Execute the callback with the client

@@ -35,8 +35,9 @@ export async function setRLSContext(userId) {
       return false;
     }
 
-    // Use parameterized query to prevent SQL injection
-    await db.query('SET LOCAL app.current_user_id = $1', [userId]);
+    // PostgreSQL doesn't support parameters in SET LOCAL commands
+    // Use string interpolation but with validated UUID to prevent SQL injection
+    await db.query(`SET LOCAL app.current_user_id = '${userId}'`, []);
     logger.debug('Set RLS context for user', { userId });
     return true;
   } catch (error) {
