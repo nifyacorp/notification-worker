@@ -50,6 +50,15 @@ export async function processBOEMessage(message) {
             document_id: doc.id || 'unknown'
           });
           doc.summary = 'No hay resumen disponible para este documento.';
+        } else if (doc.summary.length > 200) {
+          // Ensure summary is truncated to 200 chars in case it wasn't already
+          // by the BOE parser validation
+          logger.warn('Document summary too long, truncating', {
+            trace_id: message.trace_id,
+            document_id: doc.id || 'unknown',
+            original_length: doc.summary.length
+          });
+          doc.summary = doc.summary.substring(0, 197) + '...';
         }
         
         // Ensure links is an object

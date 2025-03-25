@@ -311,17 +311,28 @@ export async function createNotifications(message) {
           publication_date: doc.dates?.publication_date
         });
         
-        // First try to use notification_title field which should be optimized for display
+        // First try to use notification_title field which is optimized for display
+        // and strictly enforced to be ≤ 80 chars by the BOE parser
         if (doc.notification_title && doc.notification_title.length > 3 && 
             doc.notification_title !== 'string' && !doc.notification_title.includes('notification')) {
           notificationTitle = doc.notification_title;
-          logger.debug('Using notification_title field', { title: notificationTitle });
+          logger.debug('Using structured notification_title field', { 
+            title: notificationTitle,
+            length: notificationTitle.length
+          });
         }
         // Otherwise try the original title
         else if (doc.title && doc.title.length > 3 && 
                 doc.title !== 'string' && !doc.title.includes('notification')) {
-          notificationTitle = doc.title;
-          logger.debug('Using title field', { title: notificationTitle });
+          // Truncate long titles to 80 chars for consistency with notification_title
+          notificationTitle = doc.title.length > 80 
+            ? doc.title.substring(0, 77) + '...' 
+            : doc.title;
+          logger.debug('Using title field (truncated if needed)', { 
+            title: notificationTitle,
+            original_length: doc.title.length,
+            final_length: notificationTitle.length
+          });
         }
         // If both are missing, construct a descriptive title from available fields
         else if (doc.document_type) {
