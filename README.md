@@ -159,7 +159,12 @@ The service logs detailed operational metrics that can be viewed in Cloud Loggin
 
 ## 💬 Message Format
 
-The notification worker expects PubSub messages in the following format:
+The notification worker processes PubSub messages following a standardized schema that is consistently implemented across all NIFYA services. This schema is defined in:
+
+- [NIFYA PubSub Message Schema Documentation](/docs/pubsub-structure.md)
+- [BOE Message Schema (notification-worker/src/types/boe.js)](src/types/boe.js)
+
+All content processors (BOE, DOGA, Real Estate) must implement this schema for compatibility. Here's an example BOE message:
 
 ```json
 {
@@ -180,18 +185,29 @@ The notification worker expects PubSub messages in the following format:
         "prompt": "subvenciones agricultura",
         "documents": [
           {
-            "document_type": "resolution",
+            "document_type": "boe_document",
             "title": "Resolución de ayudas al sector agrícola",
             "summary": "Convocatoria de subvenciones para agricultores...",
             "relevance_score": 0.92,
             "links": {
               "html": "https://www.boe.es/diario_boe/txt.php?id=BOE-A-2023-12345",
               "pdf": "https://www.boe.es/boe/dias/2023/04/10/pdfs/BOE-A-2023-12345.pdf"
-            }
+            },
+            "publication_date": "2023-04-10T00:00:00.000Z",
+            "section": "III",
+            "bulletin_type": "BOE"
           }
         ]
       }
     ]
+  },
+  "metadata": {
+    "processing_time_ms": 1200,
+    "total_items_processed": 245,
+    "total_matches": 5,
+    "model_used": "gemini-2.0-pro-exp-02-05",
+    "status": "success",
+    "error": null
   }
 }
 ```
