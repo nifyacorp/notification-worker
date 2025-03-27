@@ -23,13 +23,79 @@ export async function processBOEMessage(message) {
       await db.testConnection();
     }
     
-    // Validate the message structure
+    // Validate the message structure with fallback support for different schemas
     if (!message.results?.matches || !Array.isArray(message.results.matches)) {
-      throw new Error('Invalid message format: missing or invalid matches array');
+      logger.warn('Message validation warning', {
+        processor_type: message.processor_type || 'boe',
+        trace_id: message.trace_id,
+        errors: {
+          _errors: [],
+          results: {
+            _errors: [],
+            matches: {
+              _errors: ["Required"]
+            }
+          }
+        }
+      });
+      
+      // Try to recover by looking for matches in expected locations
+      let matches = [];
+      
+      if (Array.isArray(message.results?.results?.[0]?.matches)) {
+        // Handle legacy format where matches is nested under results.results[0]
+        matches = message.results.results[0].matches;
+        logger.warn('Found matches in legacy location: results.results[0].matches', {
+          trace_id: message.trace_id,
+          match_count: matches.length
+        });
+      } else if (message.results?.results) {
+        // Try to extract matches from all results
+        matches = message.results.results.flatMap(r => 
+          Array.isArray(r.matches) ? r.matches.map(m => ({...m, prompt: r.prompt})) : []
+        );
+        logger.warn('Reconstructed matches from nested results structure', {
+          trace_id: message.trace_id,
+          match_count: matches.length
+        });
+      }
+      
+      if (matches.length > 0) {
+        // Use the recovered matches
+        message.results.matches = matches;
+        logger.info('Successfully recovered matches from alternate schema', {
+          trace_id: message.trace_id,
+          match_count: matches.length
+        });
+      } else {
+        throw new Error('Invalid message format: missing or invalid matches array');
+      }
     }
     
+    // Validate required request fields with fallbacks
     if (!message.request?.user_id || !message.request?.subscription_id) {
-      throw new Error('Invalid message format: missing user_id or subscription_id');
+      // Try to find these fields in alternate locations
+      const userId = message.request?.user_id || message.user_id || message.context?.user_id;
+      const subscriptionId = message.request?.subscription_id || message.subscription_id || message.context?.subscription_id;
+      
+      if (userId && subscriptionId) {
+        // Create request object if missing
+        if (!message.request) {
+          message.request = {};
+        }
+        
+        // Set the fields
+        message.request.user_id = userId;
+        message.request.subscription_id = subscriptionId;
+        
+        logger.warn('Recovered required request fields from alternate locations', {
+          trace_id: message.trace_id,
+          user_id: userId,
+          subscription_id: subscriptionId
+        });
+      } else {
+        throw new Error('Invalid message format: missing user_id or subscription_id');
+      }
     }
 
     // Enrich notifications with BOE-specific data
