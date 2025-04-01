@@ -13,6 +13,7 @@ A Cloud Run service that processes notifications from various content processors
 - Message validation using Zod for schema enforcement
 - Health and diagnostics endpoints for monitoring and troubleshooting
 - Secure database operations with PostgreSQL RLS policies
+- Standard entity_type format for consistent frontend rendering
 
 ## 🛠 Tech Stack
 - **Runtime**: Node.js 20
@@ -40,6 +41,29 @@ The notification worker is a critical component in the NIFYA notification pipeli
 5. **Notification Creation**: Inserts notification records into the database with proper user context
 6. **Error Handling**: Publishes failed messages to a Dead Letter Queue (DLQ) for investigation
 7. **Health Monitoring**: Provides HTTP endpoints for health checks and diagnostics
+
+## 🆕 Recent Updates
+
+### April 1, 2025: Entity Type Fix
+
+We've addressed an issue with the frontend not properly rendering notifications due to missing or improperly formatted `entity_type` fields:
+
+1. **Problem**: Notifications were not displaying correctly in the frontend because the `entity_type` field was:
+   - Either missing entirely
+   - Or stored inconsistently in the metadata JSON object
+   - Or not following the required `domain:type` format
+
+2. **Solution**:
+   - Added a dedicated `entity_type` column to the `notifications` table
+   - Updated notification creation code to consistently set the entity_type in its own column
+   - Ensured entity_type follows the standard format `domain:type` (e.g., `boe:document`)
+   - Created a migration to update existing notifications with proper entity_type values
+
+3. **Implementation Details**:
+   - The frontend expects the `entity_type` field and splits it by `:` to determine how to display notifications
+   - Added database migration `20250401000000_add_entity_type_column.sql`
+   - Modified `notification.js` to store entity_type in its dedicated column
+   - Default entity_type format is now `domain:type` (e.g., `boe:document`, `notification:generic`)
 
 ## 🧑‍💻 Local Development
 

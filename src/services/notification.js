@@ -135,7 +135,7 @@ async function publishEmailNotification(notification, email, immediate) {
  */
 export async function createNotification(data) {
   try {
-    const { userId, subscriptionId, title, content, sourceUrl = '', metadata = {} } = data;
+    const { userId, subscriptionId, title, content, sourceUrl = '', metadata = {}, entity_type = 'notification:generic' } = data;
     
     if (!userId || !subscriptionId) {
       throw new Error('Missing required fields: userId and subscriptionId');
@@ -151,8 +151,9 @@ export async function createNotification(data) {
           content,
           source_url,
           metadata,
+          entity_type,
           created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id`,
         [
           userId,
@@ -161,6 +162,7 @@ export async function createNotification(data) {
           content || '',
           sourceUrl,
           JSON.stringify(metadata),
+          entity_type, // Add entity_type to the database
           new Date()
         ]
       );
@@ -171,7 +173,8 @@ export async function createNotification(data) {
     logger.info('Created notification with RLS context', {
       user_id: userId,
       subscription_id: subscriptionId,
-      notification_id: result.rows[0]?.id
+      notification_id: result.rows[0]?.id,
+      entity_type // Log entity_type
     });
     
     const notification = {
@@ -181,6 +184,7 @@ export async function createNotification(data) {
       title,
       content,
       sourceUrl,
+      entity_type, // Include entity_type in the notification object
       created_at: new Date().toISOString()
     };
 
@@ -376,8 +380,9 @@ export async function createNotifications(message) {
                 content,
                 source_url,
                 metadata,
+                entity_type,
                 created_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
               RETURNING id`,
               [
                 user_id,
@@ -386,7 +391,6 @@ export async function createNotifications(message) {
                 doc.summary,
                 doc.links?.html || '',
                 JSON.stringify({
-                  entity_type: entityType,
                   prompt: match.prompt,
                   relevance: doc.relevance_score,
                   document_type: doc.document_type,
@@ -398,6 +402,7 @@ export async function createNotifications(message) {
                   department: doc.department,
                   trace_id: message.trace_id
                 }),
+                entityType, // Store entity_type in its own column
                 new Date()
               ],
               { maxRetries: 2 } // Use the database client's built-in retry mechanism
