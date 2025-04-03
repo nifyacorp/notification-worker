@@ -370,6 +370,94 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   
+  // Add a new debug endpoint to check recent notifications
+  if (path === '/debug/notifications' && req.method === 'GET') {
+    try {
+      // Parse query parameters
+      const queryParams = parsedUrl.query;
+      const userId = queryParams.userId || null;
+      const limit = parseInt(queryParams.limit || '10', 10);
+      const offset = parseInt(queryParams.offset || '0', 10);
+      const subscriptionId = queryParams.subscriptionId || null;
+      
+      logger.info('Processing debug notifications request', {
+        userId,
+        limit,
+        offset,
+        subscriptionId
+      });
+      
+      // Fetch recent notifications
+      let query = 'SELECT * FROM notifications';
+      const params = [];
+      let conditions = [];
+      
+      if (userId) {
+        conditions.push('user_id = $' + (params.length + 1));
+        params.push(userId);
+      }
+      
+      if (subscriptionId) {
+        conditions.push('subscription_id = $' + (params.length + 1));
+        params.push(subscriptionId);
+      }
+      
+      if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+      }
+      
+      query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
+      params.push(limit, offset);
+      
+      const notificationsResult = await db.query(query, params);
+      
+      // Count total notifications
+      let countQuery = 'SELECT COUNT(*) FROM notifications';
+      if (conditions.length > 0) {
+        countQuery += ' WHERE ' + conditions.join(' AND ');
+      }
+      
+      const countResult = await db.query(countQuery, params.slice(0, params.length - 2));
+      const totalCount = parseInt(countResult.rows[0].count, 10);
+      
+      // Get service state info
+      const serviceStateInfo = {
+        uptime: process.uptime(),
+        message_count: serviceState.messageCount,
+        successful_messages: serviceState.successfulMessages,
+        validation_errors: serviceState.validationErrors,
+        processing_errors: serviceState.processingErrors,
+        db_unavailable_errors: serviceState.dbUnavailableErrors,
+        subscription_active: serviceState.subscriptionActive,
+        operating_mode: serviceState.operatingMode
+      };
+      
+      // Send response
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        notifications: notificationsResult.rows,
+        pagination: {
+          total: totalCount,
+          offset,
+          limit,
+          has_more: offset + limit < totalCount
+        },
+        service_state: serviceStateInfo,
+        timestamp: new Date().toISOString()
+      }, null, 2));
+      
+    } catch (error) {
+      console.error('Debug notifications error:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Failed to fetch notifications',
+        message: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      }));
+    }
+    return;
+  }
+  
   // Default response for unknown routes
   logger.info('Route not found', { path: path, method: req.method });
   res.writeHead(404, { 'Content-Type': 'application/json' });
