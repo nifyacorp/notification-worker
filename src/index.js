@@ -52,10 +52,11 @@ try {
 
 // Create HTTP server for Cloud Run health checks
 const server = http.createServer(async (req, res) => {
-  // Set CORS headers
+  // Set CORS headers - adding more headers to address certificate issues
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Id, X-Requested-With, Accept');
+  res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
@@ -368,6 +369,48 @@ const server = http.createServer(async (req, res) => {
       }));
     }
     return;
+  }
+  
+  // Add a new debug endpoint to check worker status (without TLS certificate requirements)
+  if ((path === '/debug' || path === '/debug/status') && req.method === 'GET') {
+    try {
+      // Get service status information
+      const status = {
+        service: 'notification-worker',
+        status: 'running',
+        uptime: process.uptime(),
+        started_at: serviceState.startTime,
+        mode: serviceState.operatingMode,
+        environment: process.env.NODE_ENV || 'development',
+        version: process.env.npm_package_version || 'unknown',
+        health: {
+          database: serviceState.databaseActive ? 'connected' : 'disconnected',
+          pubsub: serviceState.pubsubActive ? 'connected' : 'disconnected',
+          subscription: serviceState.subscriptionActive ? 'active' : 'inactive'
+        },
+        metrics: {
+          messages_processed: serviceState.messageCount,
+          successful_messages: serviceState.successfulMessages,
+          validation_errors: serviceState.validationErrors,
+          processing_errors: serviceState.processingErrors,
+          db_unavailable_errors: serviceState.dbUnavailableErrors,
+          memory_usage: process.memoryUsage().rss / (1024 * 1024) // MB
+        },
+        timestamp: new Date().toISOString()
+      };
+      
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(status, null, 2));
+      return;
+    } catch (error) {
+      console.error('Debug status error:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Failed to fetch worker status',
+        message: error.message
+      }));
+      return;
+    }
   }
   
   // Add a new debug endpoint to check recent notifications
