@@ -44,6 +44,31 @@ The notification worker is a critical component in the NIFYA notification pipeli
 
 ## 🆕 Recent Updates
 
+### April 5, 2025: Major Refactoring
+
+We've refactored the codebase to address several critical issues and improve maintainability:
+
+1. **Problems Addressed**:
+   - Monolithic index.js with 1000+ lines mixing HTTP server, PubSub, and DB connections
+   - Excessive coupling between components (processors directly importing DB client)
+   - Giant functions (createNotifications at 225 lines, processMessage at 176 lines)
+   - Inconsistent error handling with three different retry implementations
+   - Global state variables used throughout the codebase
+
+2. **Solutions**:
+   - Separated concerns into modular components with clear responsibilities
+   - Implemented dependency injection for database and PubSub services
+   - Unified error handling with a centralized retry mechanism
+   - Created proper interfaces between components
+   - Refactored large functions into smaller, focused units
+
+3. **Implementation Details**:
+   - Created a centralized configuration system in `src/config/`
+   - Separated HTTP routing into dedicated route handlers
+   - Implemented a service-based architecture for database, PubSub, and notifications
+   - Normalized error handling and retry logic across the application
+   - Reduced duplicate code for validation and error handling
+
 ### April 1, 2025: Entity Type Fix
 
 We've addressed an issue with the frontend not properly rendering notifications due to missing or improperly formatted `entity_type` fields:
@@ -269,17 +294,30 @@ Common issues and solutions:
 ```
 .
 ├── src/
+│   ├── config/
+│   │   └── index.js        # Centralized configuration
 │   ├── database/
-│   │   └── client.js       # Database connection and RLS handling
+│   │   └── client.js       # Legacy database connection (for backward compatibility)
+│   ├── middleware/         # HTTP middleware functions
 │   ├── processors/
 │   │   ├── boe.js          # BOE notification processor
 │   │   └── real-estate.js  # Real estate notification processor
+│   ├── routes/
+│   │   ├── diagnostics.js  # Diagnostic route handlers
+│   │   ├── health.js       # Health check endpoints
+│   │   └── index.js        # Main router
 │   ├── services/
-│   │   └── notification.js # Notification creation service with RLS support
+│   │   ├── database.js     # Database service
+│   │   ├── notification.js # Notification creation service with RLS support
+│   │   ├── status.js       # Service status tracking
+│   │   └── pubsub/
+│   │       ├── client.js   # PubSub client and topics
+│   │       └── processor.js # Message processing logic
 │   ├── types/
 │   │   └── message.js      # TypeScript-like schema definitions
 │   ├── utils/
 │   │   ├── logger.js       # Structured logging utilities
+│   │   ├── retry.js        # Unified retry mechanism
 │   │   └── validation.js   # Message validation schemas
 │   └── index.js            # Service entry point and HTTP server
 ├── Dockerfile              # Container definition

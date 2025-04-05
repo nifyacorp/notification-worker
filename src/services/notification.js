@@ -1,20 +1,11 @@
-import { db } from '../database/client.js';
+import { database } from './database.js';
 import { logger } from '../utils/logger.js';
-import { PubSub } from '@google-cloud/pubsub';
+import { publishToTopic, getEmailTopics } from './pubsub/client.js';
 import { triggerRealtimeNotification } from './realtime-notification.js';
+import { withRetry } from '../utils/retry.js';
 
-// Initialize PubSub client for email notifications
-const pubsub = new PubSub({
-  projectId: process.env.GOOGLE_CLOUD_PROJECT
-});
-
-// Email notification topics
-const EMAIL_IMMEDIATE_TOPIC = process.env.EMAIL_IMMEDIATE_TOPIC || 'email-notifications-immediate';
-const EMAIL_DAILY_TOPIC = process.env.EMAIL_DAILY_TOPIC || 'email-notifications-daily';
-
-// Get topic references
-const immediateEmailTopic = pubsub.topic(EMAIL_IMMEDIATE_TOPIC);
-const dailyEmailTopic = pubsub.topic(EMAIL_DAILY_TOPIC);
+// Get email topics
+const emailTopics = getEmailTopics();
 
 /**
  * Sets the app.current_user_id session variable to bypass RLS policies
@@ -35,10 +26,7 @@ export async function setRLSContext(userId) {
       return false;
     }
 
-    // PostgreSQL doesn't support parameters in SET LOCAL commands
-    // Use string interpolation but with validated UUID to prevent SQL injection
-    await db.query(`SET LOCAL app.current_user_id = '${userId}'`, []);
-    logger.debug('Set RLS context for user', { userId });
+    await database.setRLSContext(userId);
     return true;
   } catch (error) {
     logger.warn('Failed to set RLS context', {
@@ -56,7 +44,7 @@ export async function setRLSContext(userId) {
  */
 async function shouldSendInstantEmail(userId) {
   try {
-    const result = await db.query(`
+    const result = await database.query(`
       SELECT 
         email,
         notification_settings->>'notificationEmail' as notification_email,
@@ -105,16 +93,14 @@ async function publishEmailNotification(notification, email, immediate) {
       timestamp: new Date().toISOString()
     };
 
-    const topic = immediate ? immediateEmailTopic : dailyEmailTopic;
-    const messageBuffer = Buffer.from(JSON.stringify(messageData));
+    const topicName = immediate ? 'email-notifications-immediate' : 'email-notifications-daily';
     
-    const messageId = await topic.publish(messageBuffer);
+    const messageId = await publishToTopic(topicName, messageData);
     
     logger.info(`Published notification to ${immediate ? 'immediate' : 'daily'} email topic`, {
       notification_id: notification.id,
       user_id: notification.userId,
-      message_id: messageId,
-      email_topic: immediate ? EMAIL_IMMEDIATE_TOPIC : EMAIL_DAILY_TOPIC
+      message_id: messageId
     });
     
     return messageId;
@@ -142,7 +128,7 @@ export async function createNotification(data) {
     }
     
     // Use the withRLSContext method to handle the transaction with proper RLS context
-    const result = await db.withRLSContext(userId, async (client) => {
+    const result = await database.withRLSContext(userId, async (client) => {
       const insertResult = await client.query(
         `INSERT INTO notifications (
           user_id,
@@ -162,7 +148,7 @@ export async function createNotification(data) {
           content || '',
           sourceUrl,
           JSON.stringify(metadata),
-          entity_type, // Add entity_type to the database
+          entity_type,
           new Date()
         ]
       );
@@ -174,7 +160,7 @@ export async function createNotification(data) {
       user_id: userId,
       subscription_id: subscriptionId,
       notification_id: result.rows[0]?.id,
-      entity_type // Log entity_type
+      entity_type
     });
     
     const notification = {
@@ -184,7 +170,7 @@ export async function createNotification(data) {
       title,
       content,
       sourceUrl,
-      entity_type, // Include entity_type in the notification object
+      entity_type,
       created_at: new Date().toISOString()
     };
 
@@ -194,7 +180,7 @@ export async function createNotification(data) {
     if (shouldSend && email) {
       // Get subscription name for better email context
       try {
-        const subResult = await db.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
+        const subResult = await database.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
         if (subResult.rows.length > 0) {
           notification.subscriptionName = subResult.rows[0].name;
         }
@@ -210,7 +196,7 @@ export async function createNotification(data) {
     } else {
       // Always add to daily digest queue if user has email notifications enabled
       try {
-        const userResult = await db.query(`
+        const userResult = await database.query(`
           SELECT 
             (notification_settings->>'emailNotifications')::boolean as email_notifications,
             notification_settings->>'notificationEmail' as notification_email,
@@ -224,7 +210,7 @@ export async function createNotification(data) {
           if (userEmail) {
             // Get subscription name for better email context
             try {
-              const subResult = await db.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
+              const subResult = await database.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
               if (subResult.rows.length > 0) {
                 notification.subscriptionName = subResult.rows[0].name;
               }
@@ -246,6 +232,7 @@ export async function createNotification(data) {
         });
       }
     }
+    
     // Trigger realtime notification via WebSocket (regardless of email preferences)
     try {
       await triggerRealtimeNotification(notification);
@@ -262,7 +249,6 @@ export async function createNotification(data) {
       });
     }
 
-
     return notification;
   } catch (error) {
     logger.error('Failed to create notification', {
@@ -274,6 +260,11 @@ export async function createNotification(data) {
   }
 }
 
+/**
+ * Creates a batch of notifications from results data
+ * @param {Object} message - Message with user, subscription and results data
+ * @returns {Promise<Object>} - Created notification stats
+ */
 export async function createNotifications(message) {
   const { user_id, subscription_id } = message.request;
   let notificationsCreated = 0;
@@ -303,76 +294,49 @@ export async function createNotifications(message) {
   for (const match of message.results.matches) {
     for (const doc of match.documents) {
       try {
-        // ENHANCED TITLE GENERATION - Generate a more meaningful title
-        let notificationTitle = '';
-        
-        // Log the available title fields for debugging
-        logger.debug('Notification title generation data:', {
-          notification_title: doc.notification_title,
-          title: doc.title,
-          document_type: doc.document_type,
-          issuing_body: doc.issuing_body,
-          department: doc.department,
-          publication_date: doc.dates?.publication_date
-        });
-        
-        // First try to use notification_title field which is optimized for display
-        // and strictly enforced to be ≤ 80 chars by the BOE parser
-        if (doc.notification_title && doc.notification_title.length > 3 && 
-            doc.notification_title !== 'string' && !doc.notification_title.includes('notification')) {
-          notificationTitle = doc.notification_title;
-          logger.debug('Using structured notification_title field', { 
-            title: notificationTitle,
-            length: notificationTitle.length
-          });
-        }
-        // Otherwise try the original title
-        else if (doc.title && doc.title.length > 3 && 
-                doc.title !== 'string' && !doc.title.includes('notification')) {
-          // Truncate long titles to 80 chars for consistency with notification_title
-          notificationTitle = doc.title.length > 80 
-            ? doc.title.substring(0, 77) + '...' 
-            : doc.title;
-          logger.debug('Using title field (truncated if needed)', { 
-            title: notificationTitle,
-            original_length: doc.title.length,
-            final_length: notificationTitle.length
-          });
-        }
-        // If both are missing, construct a descriptive title from available fields
-        else if (doc.document_type) {
-          // Construct a descriptive title based on available metadata
-          const docType = doc.document_type || 'Documento';
-          const issuer = doc.issuing_body || doc.department || '';
-          const date = doc.dates?.publication_date ? ` (${doc.dates.publication_date})` : '';
-          
-          notificationTitle = `${docType}${issuer ? ' de ' + issuer : ''}${date}`;
-          logger.debug('Constructed title from document metadata', { title: notificationTitle });
-        }
-        else {
-          // Enhanced last resort - use relevant context from match data
-          const subscription = message.processor_type || '';
-          const promptContext = match.prompt && match.prompt.length > 5 ? 
-            `: "${match.prompt.substring(0, 30)}${match.prompt.length > 30 ? '...' : ''}"` : '';
+        // Process this document with retry logic
+        await withRetry(
+          async () => {
+            // ENHANCED TITLE GENERATION - Generate a more meaningful title
+            let notificationTitle = '';
             
-          notificationTitle = subscription 
-            ? `Alerta ${subscription}${promptContext}` 
-            : `Alerta BOE${promptContext}`;
+            // First try to use notification_title field which is optimized for display
+            if (doc.notification_title && doc.notification_title.length > 3 && 
+                doc.notification_title !== 'string' && !doc.notification_title.includes('notification')) {
+              notificationTitle = doc.notification_title;
+            }
+            // Otherwise try the original title
+            else if (doc.title && doc.title.length > 3 && 
+                    doc.title !== 'string' && !doc.title.includes('notification')) {
+              // Truncate long titles to 80 chars for consistency with notification_title
+              notificationTitle = doc.title.length > 80 
+                ? doc.title.substring(0, 77) + '...' 
+                : doc.title;
+            }
+            // If both are missing, construct a descriptive title from available fields
+            else if (doc.document_type) {
+              // Construct a descriptive title based on available metadata
+              const docType = doc.document_type || 'Documento';
+              const issuer = doc.issuing_body || doc.department || '';
+              const date = doc.dates?.publication_date ? ` (${doc.dates.publication_date})` : '';
+              
+              notificationTitle = `${docType}${issuer ? ' de ' + issuer : ''}${date}`;
+            }
+            else {
+              // Enhanced last resort - use relevant context from match data
+              const subscription = message.processor_type || '';
+              const promptContext = match.prompt && match.prompt.length > 5 ? 
+                `: "${match.prompt.substring(0, 30)}${match.prompt.length > 30 ? '...' : ''}"` : '';
+                
+              notificationTitle = subscription 
+                ? `Alerta ${subscription}${promptContext}` 
+                : `Alerta BOE${promptContext}`;
+            }
             
-          logger.debug('Using fallback title with context', { title: notificationTitle });
-        }
-        
-        // Create entity_type for metadata
-        const entityType = `boe:${doc.document_type?.toLowerCase() || 'document'}`;
-        
-        // Retry up to 3 times with exponential backoff
-        let attempt = 0;
-        const maxAttempts = 3;
-        let lastError = null;
-        
-        while (attempt < maxAttempts) {
-          try {
-            const result = await db.query(
+            // Create entity_type for metadata
+            const entityType = `boe:${doc.document_type?.toLowerCase() || 'document'}`;
+            
+            const result = await database.query(
               `INSERT INTO notifications (
                 user_id,
                 subscription_id,
@@ -402,10 +366,10 @@ export async function createNotifications(message) {
                   department: doc.department,
                   trace_id: message.trace_id
                 }),
-                entityType, // Store entity_type in its own column
+                entityType,
                 new Date()
               ],
-              { maxRetries: 2 } // Use the database client's built-in retry mechanism
+              { maxRetries: 2 }
             );
 
             logger.info('Created notification', {
@@ -415,63 +379,46 @@ export async function createNotifications(message) {
               title: notificationTitle,
               document_type: doc.document_type,
               entity_type: entityType,
-              attempt: attempt + 1,
               trace_id: message.trace_id
             });
             
             notificationsCreated++;
-            break; // Exit retry loop on success
-          } catch (dbError) {
-            attempt++;
-            lastError = dbError;
-            
-            // Check if this might be an RLS error
-            const isRLSError = 
-              dbError.message.includes('permission denied') || 
-              dbError.message.includes('insufficient privilege');
-              
-            // If it looks like an RLS error, try to set the context again
-            if (isRLSError) {
-              logger.warn('Possible RLS error, attempting to set context again', {
-                error: dbError.message,
-                user_id,
-                attempt
-              });
-              
-              try {
-                await setRLSContext(user_id);
-              } catch (rlsError) {
-                logger.warn('Failed to reset RLS context during retry', {
-                  error: rlsError.message
+          },
+          {
+            name: 'createNotification',
+            maxRetries: 2,
+            initialDelay: 1000,
+            onRetry: async (error, attempt) => {
+              // Check if this might be an RLS error
+              const isRLSError = 
+                error.message.includes('permission denied') || 
+                error.message.includes('insufficient privilege');
+                
+              // If it looks like an RLS error, try to set the context again
+              if (isRLSError) {
+                logger.warn('Possible RLS error, attempting to set context again', {
+                  error: error.message,
+                  user_id,
+                  attempt
                 });
+                
+                try {
+                  await setRLSContext(user_id);
+                } catch (rlsError) {
+                  logger.warn('Failed to reset RLS context during retry', {
+                    error: rlsError.message
+                  });
+                }
               }
-            }
-            
-            // Only retry on connection-related errors or RLS errors
-            const isConnectionError = 
-              dbError.code === 'ECONNREFUSED' || 
-              dbError.code === '57P01' || // admin_shutdown
-              dbError.code === '57P03' || // cannot_connect_now
-              dbError.message.includes('timeout') ||
-              dbError.message.includes('Connection terminated');
-              
-            if ((!isConnectionError && !isRLSError) || attempt >= maxAttempts) {
-              throw dbError; // Rethrow for outer catch if not retryable or max attempts reached
-            }
-            
-            const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-            logger.warn(`Retrying notification creation in ${delay}ms`, {
-              user_id, 
+            },
+            context: {
+              user_id,
               subscription_id,
-              attempt,
-              max_attempts: maxAttempts,
-              error: dbError.message,
+              document_type: doc.document_type,
               trace_id: message.trace_id
-            });
-            
-            await new Promise(resolve => setTimeout(resolve, delay));
+            }
           }
-        }
+        );
       } catch (error) {
         errors++;
         logger.error('Failed to create notification', {
