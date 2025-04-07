@@ -1,0 +1,91 @@
+# Cloud Build configuration for Notification Worker
+# This file defines the CI/CD pipeline for building, testing, and deploying the service
+
+steps:
+  # Install dependencies
+  - name: 'node:18'
+    id: 'install'
+    entrypoint: npm
+    args: ['install']
+    
+  # Run linting
+  - name: 'node:18'
+    id: 'lint'
+    entrypoint: npm
+    args: ['run', 'lint']
+    waitFor: ['install']
+    
+  # Run type checking
+  - name: 'node:18'
+    id: 'typecheck'
+    entrypoint: npm
+    args: ['run', 'typecheck']
+    waitFor: ['install']
+    
+  # Run tests
+  - name: 'node:18'
+    id: 'test'
+    entrypoint: npm
+    args: ['test']
+    waitFor: ['install']
+    
+  # Build the application
+  - name: 'node:18'
+    id: 'build'
+    entrypoint: npm
+    args: ['run', 'build']
+    waitFor: ['lint', 'typecheck', 'test']
+    
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args: [
+      'build',
+      '--tag', 'gcr.io/$PROJECT_ID/notification-worker:$COMMIT_SHA',
+      '--tag', 'gcr.io/$PROJECT_ID/notification-worker:latest',
+      '.'
+    ]
+    waitFor: ['build']
+    
+  # Push the Docker image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
+    args: ['push', 'gcr.io/$PROJECT_ID/notification-worker:$COMMIT_SHA']
+    waitFor: ['build-image']
+    
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy'
+    entrypoint: gcloud
+    args: [
+      'run', 'deploy', 'notification-worker',
+      '--image', 'gcr.io/$PROJECT_ID/notification-worker:$COMMIT_SHA',
+      '--platform', 'managed',
+      '--region', 'us-central1',
+      '--set-env-vars', 'NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,PUBSUB_SUBSCRIPTION=notification-subscription,DLQ_TOPIC=notification-dlq',
+      '--allow-unauthenticated'
+    ]
+    waitFor: ['push-image']
+
+# Store images in Google Container Registry
+images:
+  - 'gcr.io/$PROJECT_ID/notification-worker:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/notification-worker:latest'
+
+# Configure timeout
+timeout: 1800s
+
+# Use a pool of workers with more CPU and memory
+options:
+  pool:
+    name: 'projects/$PROJECT_ID/locations/us-central1/workerPools/notification-worker-pool'
+    
+# Notifications
+substitutions:
+  _NOTIFICATION_TOPIC: cloud-builds
+  
+# Artifacts
+artifacts:
+  objects:
+    location: 'gs://${PROJECT_ID}-artifacts/notification-worker/${COMMIT_SHA}'
+    paths: ['test-reports/**/*', 'coverage/**/*']
