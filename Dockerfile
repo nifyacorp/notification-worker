@@ -6,15 +6,22 @@ WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
+COPY tsconfig.json ./
 
 # Install dependencies with necessary SSL packages
 RUN apt-get update && \
     apt-get install -y ca-certificates openssl && \
     update-ca-certificates && \
-    npm ci --only=production
+    npm ci
 
 # Copy app source
-COPY src/ ./src/
+COPY src-new/ ./src-new/
+
+# Build TypeScript code
+RUN npm run build
+
+# Clean up dev dependencies to reduce image size
+RUN npm prune --production
 
 # Set environment variables
 ENV NODE_ENV=production
