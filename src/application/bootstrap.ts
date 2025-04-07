@@ -34,6 +34,9 @@ export class Application {
   private notificationService: NotificationService;
   private serviceStatus: ServiceStatus;
   
+  // For testing purposes
+  public mockDatabaseConnection = false;
+  
   constructor() {
     // Log configuration
     logConfig();
@@ -76,9 +79,14 @@ export class Application {
       // Initialize database connection
       logger.info('Testing database connection');
       try {
-        await this.dbConnection.testConnection();
-        logger.info('Database connection successful');
-        this.serviceStatus.setDatabaseActive(true);
+        if (this.mockDatabaseConnection) {
+          logger.info('Using mock database connection');
+          this.serviceStatus.setDatabaseActive(true);
+        } else {
+          await this.dbConnection.testConnection();
+          logger.info('Database connection successful');
+          this.serviceStatus.setDatabaseActive(true);
+        }
       } catch (error) {
         logger.error('Database connection failed', {
           error: (error as Error).message,
@@ -105,15 +113,21 @@ export class Application {
       
       // Initialize PubSub
       try {
-        await this.pubSubService.initialize();
-        logger.info('PubSub resources initialized successfully');
-        this.serviceStatus.setPubSubActive(true);
-        
-        // Set up message processor subscription
-        if (config.pubsub.subscription) {
-          await this.setupMessageProcessing();
-          logger.info('PubSub subscription listeners set up successfully');
+        if (this.mockDatabaseConnection) {
+          logger.info('Using mock PubSub service');
+          this.serviceStatus.setPubSubActive(true);
           this.serviceStatus.setSubscriptionActive(true);
+        } else {
+          await this.pubSubService.initialize();
+          logger.info('PubSub resources initialized successfully');
+          this.serviceStatus.setPubSubActive(true);
+          
+          // Set up message processor subscription
+          if (config.pubsub.subscription) {
+            await this.setupMessageProcessing();
+            logger.info('PubSub subscription listeners set up successfully');
+            this.serviceStatus.setSubscriptionActive(true);
+          }
         }
       } catch (error) {
         logger.error('Failed to initialize PubSub resources', {

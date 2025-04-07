@@ -251,7 +251,7 @@ async function diagnosticsHandler(
   const dbState = dbConnection.getConnectionState();
   
   // Get processor information
-  const processors = processorRegistry.getAllProcessors().map(processor => ({
+  const processors = processorRegistry.getAllProcessors().map((processor: { processorType: string; requiresDatabase: boolean }) => ({
     type: processor.processorType,
     requiresDatabase: processor.requiresDatabase
   }));

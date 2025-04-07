@@ -63,7 +63,7 @@ export async function withRetry<T>(
   
   // Initialize attempt counter
   let attempt = 0;
-  let lastError: Error;
+  let lastError: Error | undefined;
   
   // Create a function that determines if we should retry based on error
   const shouldRetry = options.retryOnError || (() => true);

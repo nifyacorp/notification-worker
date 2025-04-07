@@ -303,7 +303,21 @@ export class PostgresNotificationRepository implements NotificationRepository {
    */
   public async findById(id: string): Promise<Notification | null> {
     try {
-      const result = await this.db.query<any>(
+      interface NotificationRow {
+        id: string;
+        user_id: string;
+        subscription_id: string;
+        title: string;
+        content: string;
+        source_url: string;
+        metadata: any;
+        entity_type: string;
+        status: string;
+        created_at: Date;
+        updated_at: Date;
+      }
+      
+      const result = await this.db.query<NotificationRow>(
         `SELECT 
           id, user_id, subscription_id, title, content, source_url, 
           metadata, entity_type, status, created_at, updated_at
