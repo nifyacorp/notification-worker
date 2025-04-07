@@ -3,7 +3,10 @@
  * Manages PostgreSQL connections with enhanced retry and monitoring
  */
 
-import { Pool, PoolClient, QueryResult } from 'pg';
+import pg from 'pg';
+const { Pool } = pg;
+type PoolClient = pg.PoolClient;
+type QueryResult<T> = pg.QueryResult<T>;
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import { Logger } from '../../shared/logger/logger';
 

@@ -6,6 +6,8 @@
 import { app } from './application/bootstrap';
 import { logger } from './shared/logger/logger';
 import { ProcessorType } from './domain/models/message';
+import { MockNotificationRepository } from './infrastructure/repositories/mock-notification-repository';
+import { MockPubSubService } from './infrastructure/messaging/mock-pubsub-service';
 
 /**
  * Mock BOE message for testing
@@ -113,6 +115,12 @@ function setupMockEnvironment() {
   
   // Mock connection checking for DB
   app.mockDatabaseConnection = true;
+  
+  // Replace repositories with mock implementations
+  app.setMockRepositories(
+    new MockNotificationRepository(logger),
+    new MockPubSubService(logger)
+  );
   
   logger.info('Set up mock environment for testing');
 }

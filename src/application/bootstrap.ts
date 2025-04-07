@@ -340,6 +340,63 @@ export class Application {
     // Exit process
     process.exit(0);
   }
+  
+  /**
+   * Process a mock message for testing
+   * @param message The mock message to process
+   * @returns Processing result
+   */
+  public async processMockMessage(message: ProcessorMessage): Promise<any> {
+    try {
+      logger.info('Processing mock message', {
+        processor_type: message.processor_type,
+        trace_id: message.trace_id
+      });
+      
+      // Process the message using the notification service
+      const result = await this.notificationService.processMessage(message);
+      
+      logger.info('Mock message processed successfully', {
+        processor_type: message.processor_type,
+        trace_id: message.trace_id,
+        result
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error('Error processing mock message', {
+        error: (error as Error).message,
+        processor_type: message.processor_type,
+        trace_id: message.trace_id
+      });
+      
+      throw error;
+    }
+  }
+  
+  /**
+   * Set mock repositories for testing
+   * @param notificationRepository - Mock notification repository
+   * @param pubSubService - Mock PubSub service
+   */
+  public setMockRepositories(
+    notificationRepository: NotificationRepository,
+    pubSubService: PubSubService
+  ): void {
+    this.notificationRepository = notificationRepository;
+    this.pubSubService = pubSubService;
+    
+    // Recreate notification service with mock repositories
+    this.notificationService = new DefaultNotificationService(
+      this.notificationRepository,
+      this.processorRegistry,
+      this.dbConnection,
+      this.pubSubService,
+      logger
+    );
+    
+    logger.info('Set mock repositories for testing');
+  }
 }
 
 // Export singleton instance
