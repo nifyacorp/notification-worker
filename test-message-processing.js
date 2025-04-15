@@ -1,14 +1,64 @@
 import { processMessage } from './src/services/parser.js';
 import { logger } from './src/utils/logger.js';
 import { database } from './src/services/database.js';
+import { v4 as uuidv4 } from 'uuid';
 
-// Test user ID - use a test account
+// Test user ID and subscription ID - use test accounts
 const TEST_USER_ID = '8bf705b5-2423-4257-92bd-ab0df1ee3218';
 const TEST_SUBSCRIPTION_ID = '00000000-0000-0000-0000-000000000000';
 
-// Sample message in the new format
+// Create a test subscription processing record
+async function createTestSubscriptionProcessing(subscriptionId) {
+  try {
+    const result = await database.query(
+      `INSERT INTO subscription_processing 
+        (subscription_id, status, next_run_at, last_run_at, metadata) 
+       VALUES 
+        ($1, $2, $3, $4, $5) 
+       RETURNING id`,
+      [
+        subscriptionId,
+        'processing',
+        new Date(Date.now() + 86400000), // tomorrow
+        new Date(),
+        JSON.stringify({ test: true })
+      ]
+    );
+    
+    return result.rows[0]?.id;
+  } catch (error) {
+    logger.error('Failed to create test subscription processing record', {
+      error: error.message,
+      subscription_id: subscriptionId
+    });
+    throw error;
+  }
+}
+
+// Verify if subscription processing record exists
+async function checkSubscriptionProcessing(subscriptionId) {
+  try {
+    const result = await database.query(
+      `SELECT id, status FROM subscription_processing WHERE subscription_id = $1`,
+      [subscriptionId]
+    );
+    
+    return {
+      exists: result.rowCount > 0,
+      records: result.rows
+    };
+  } catch (error) {
+    logger.error('Failed to check subscription processing record', {
+      error: error.message,
+      subscription_id: subscriptionId
+    });
+    throw error;
+  }
+}
+
+// Sample message with the new format
 const testMessage = {
-  "trace_id": "test-trace-id-" + Date.now(),
+  "trace_id": "test-trace-id-" + uuidv4(),
   "request": {
     "texts": ["Subvenciones energías renovables", "Ayudas para pymes"],
     "subscription_id": TEST_SUBSCRIPTION_ID,
@@ -47,32 +97,6 @@ const testMessage = {
             "total_tokens": 12500
           }
         }
-      },
-      {
-        "prompt": "Ayudas para pymes",
-        "matches": [
-          {
-            "document_type": "ORDER",
-            "title": "Orden por la que se establecen ayudas para la digitalización de pymes",
-            "notification_title": "Ayudas para digitalización de pequeñas empresas",
-            "issuing_body": "Ministerio de Industria, Comercio y Turismo",
-            "summary": "Se establecen las bases reguladoras para la concesión de ayudas para la digitalización de pequeñas y medianas empresas.",
-            "relevance_score": 78,
-            "links": {
-              "html": "https://www.boe.es/diario_boe/example2.html",
-              "pdf": "https://www.boe.es/diario_boe/example2.pdf"
-            }
-          }
-        ],
-        "metadata": {
-          "processing_time_ms": 980,
-          "model_used": "gemini-2.0-flash-lite",
-          "token_usage": {
-            "input_tokens": 10500,
-            "output_tokens": 420,
-            "total_tokens": 10920
-          }
-        }
       }
     ]
   },
@@ -83,43 +107,33 @@ const testMessage = {
   }
 };
 
-// Sample message in old format for backward compatibility testing
-const legacyMessage = {
-  "trace_id": "legacy-test-trace-id-" + Date.now(),
-  "request": {
-    "prompts": ["Legacy format test"],
-    "subscription_id": TEST_SUBSCRIPTION_ID,
-    "user_id": TEST_USER_ID
-  },
-  "results": {
-    "matches": [
-      {
-        "prompt": "Legacy format test",
-        "documents": [
-          {
-            "document_type": "ANNOUNCEMENT",
-            "title": "Legacy format document test",
-            "summary": "This is a test of the legacy format compatibility.",
-            "links": {
-              "html": "https://example.com/legacy"
-            }
-          }
-        ]
-      }
-    ]
-  }
-};
-
 async function runTest() {
   try {
-    logger.info('Starting unified parser test with new message format');
+    logger.info('Starting notification processing test with subscription cleanup');
     
     // Test database connection
     logger.info('Testing database connection');
     await database.testConnection();
     
-    // Process the test message in new format
-    logger.info('Processing test message (new format)', { 
+    // Create test subscription processing record
+    logger.info('Creating test subscription processing record');
+    const processingId = await createTestSubscriptionProcessing(TEST_SUBSCRIPTION_ID);
+    
+    logger.info('Created test subscription processing record', { 
+      processing_id: processingId,
+      subscription_id: TEST_SUBSCRIPTION_ID
+    });
+    
+    // Verify the record exists
+    const beforeCheck = await checkSubscriptionProcessing(TEST_SUBSCRIPTION_ID);
+    logger.info('Subscription processing record check before processing', beforeCheck);
+    
+    if (!beforeCheck.exists) {
+      throw new Error('Test subscription processing record was not created');
+    }
+    
+    // Process the test message
+    logger.info('Processing test message', { 
       trace_id: testMessage.trace_id,
       user_id: testMessage.request.user_id,
       subscription_id: testMessage.request.subscription_id
@@ -127,34 +141,31 @@ async function runTest() {
     
     const result = await processMessage(testMessage);
     
-    logger.info('Test message (new format) processed successfully', { 
+    logger.info('Test message processed successfully', { 
       notifications_created: result.created,
       errors: result.errors
     });
     
-    // Process the legacy format message to test backward compatibility
-    logger.info('Processing test message (legacy format)', { 
-      trace_id: legacyMessage.trace_id,
-      user_id: legacyMessage.request.user_id,
-      subscription_id: legacyMessage.request.subscription_id
-    });
+    // Verify the record was deleted
+    const afterCheck = await checkSubscriptionProcessing(TEST_SUBSCRIPTION_ID);
+    logger.info('Subscription processing record check after processing', afterCheck);
     
-    const legacyResult = await processMessage(legacyMessage);
-    
-    logger.info('Test message (legacy format) processed successfully', { 
-      notifications_created: legacyResult.created,
-      errors: legacyResult.errors
-    });
+    if (afterCheck.exists) {
+      logger.warn('Subscription processing record was not deleted as expected', {
+        records: afterCheck.records
+      });
+    } else {
+      logger.info('Subscription processing record was successfully deleted');
+    }
     
     // Verify notifications were created
-    const totalCreated = result.created + legacyResult.created;
-    if (totalCreated > 0) {
-      logger.info(`Successfully created ${totalCreated} notifications`);
+    if (result.created > 0) {
+      logger.info(`Successfully created ${result.created} notifications`);
       
       // Verify we can read them back with proper RLS context
       const readResult = await database.withRLSContext(TEST_USER_ID, async (client) => {
         return client.query(
-          'SELECT id, title, content, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5',
+          'SELECT id, title, content, source, entity_type, data, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5',
           [TEST_USER_ID]
         );
       });
@@ -165,6 +176,9 @@ async function runTest() {
           latest: readResult.rows.map(row => ({
             id: row.id,
             title: row.title,
+            source: row.source,
+            entity_type: row.entity_type,
+            data_fields: Object.keys(row.data || {}),
             created_at: row.created_at
           }))
         });

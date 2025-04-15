@@ -121,7 +121,17 @@ async function publishEmailNotification(notification, email, immediate) {
  */
 export async function createNotification(data) {
   try {
-    const { userId, subscriptionId, title, content, sourceUrl = '', metadata = {}, entity_type = 'notification:generic' } = data;
+    const { 
+      userId, 
+      subscriptionId, 
+      title, 
+      content, 
+      sourceUrl = '', 
+      source = null,
+      data: notificationData = {},
+      metadata = {}, 
+      entity_type = 'notification:generic' 
+    } = data;
     
     if (!userId || !subscriptionId) {
       throw new Error('Missing required fields: userId and subscriptionId');
@@ -136,10 +146,13 @@ export async function createNotification(data) {
           title,
           content,
           source_url,
+          source,
+          data,
           metadata,
           entity_type,
-          created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          created_at,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         RETURNING id`,
         [
           userId,
@@ -147,6 +160,8 @@ export async function createNotification(data) {
           title || 'Notification',
           content || '',
           sourceUrl,
+          source,
+          JSON.stringify(notificationData),
           JSON.stringify(metadata),
           entity_type,
           new Date()
@@ -160,7 +175,8 @@ export async function createNotification(data) {
       user_id: userId,
       subscription_id: subscriptionId,
       notification_id: result.rows[0]?.id,
-      entity_type
+      entity_type,
+      source
     });
     
     const notification = {
@@ -170,6 +186,7 @@ export async function createNotification(data) {
       title,
       content,
       sourceUrl,
+      source,
       entity_type,
       created_at: new Date().toISOString()
     };

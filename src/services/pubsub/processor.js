@@ -2,8 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../utils/logger.js';
 import { publishToDLQ } from './client.js';
 import { withRetry } from '../../utils/retry.js';
-// Import the new notification processor
-import { createNotificationsFromMessage } from '../notification-processor.js';
+// Import the new unified parser service
+import { processMessage as processParserMessage } from '../parser.js';
 
 // Tracking metrics
 export const processorMetrics = {
@@ -50,37 +50,23 @@ export async function processMessage(message) {
       logger.info('Generated missing trace ID', { trace_id: messageData.trace_id });
     }
     
-    // Basic validation of required fields
-    const { request, results } = messageData;
-    
-    if (!request || !request.user_id || !request.subscription_id) {
-      logger.error('Missing required fields in message', {
+    // Basic validation of required fields - more detailed validation in parser
+    if (!messageData.request) {
+      logger.error('Missing request object in message', {
         message_id: message.id,
         trace_id: messageData.trace_id || 'unknown'
       });
       
-      await publishToDLQ(messageData, new Error('Missing required fields'));
+      await publishToDLQ(messageData, new Error('Missing request object'));
       message.ack();
       return;
     }
     
-    // Validate results structure for the new format
-    if (!results || !results.results || !Array.isArray(results.results)) {
-      logger.error('Invalid results structure in message', {
-        message_id: message.id,
-        trace_id: messageData.trace_id || 'unknown'
-      });
-      
-      await publishToDLQ(messageData, new Error('Invalid results structure'));
-      message.ack();
-      return;
-    }
-    
-    // Process message and create notifications with retry logic for transient errors
+    // Process message with the unified parser service
     await withRetry(
-      () => createNotificationsFromMessage(messageData),
+      () => processParserMessage(messageData),
       {
-        name: 'createNotificationsFromMessage',
+        name: 'processParserMessage',
         maxRetries: 2,
         initialDelay: 2000,
         // Only retry on connection errors
@@ -112,8 +98,8 @@ export async function processMessage(message) {
     
     logger.info('Successfully processed message', {
       trace_id: messageData.trace_id,
-      subscription_id: request.subscription_id,
-      user_id: request.user_id,
+      subscription_id: messageData.request?.subscription_id,
+      user_id: messageData.request?.user_id,
       processing_time_ms: Date.now() - processingStart
     });
   } catch (error) {
@@ -161,7 +147,7 @@ export async function setupSubscriptionListeners(subscription, onError) {
     subscription.removeAllListeners('message');
     subscription.removeAllListeners('error');
     
-    // Set up message handler with the simplified processor
+    // Set up message handler with the unified processor
     subscription.on('message', processMessage);
     
     // Set up error handler
