@@ -64,6 +64,18 @@ export async function processMessage(message) {
       return;
     }
     
+    // Validate results structure for the new format
+    if (!results || !results.results || !Array.isArray(results.results)) {
+      logger.error('Invalid results structure in message', {
+        message_id: message.id,
+        trace_id: messageData.trace_id || 'unknown'
+      });
+      
+      await publishToDLQ(messageData, new Error('Invalid results structure'));
+      message.ack();
+      return;
+    }
+    
     // Process message and create notifications with retry logic for transient errors
     await withRetry(
       () => createNotificationsFromMessage(messageData),
