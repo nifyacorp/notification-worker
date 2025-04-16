@@ -7,6 +7,7 @@ A Cloud Run service that processes notifications from various content processors
 - Processes PubSub messages from content processors
 - Creates user notifications in the database with proper Row-Level Security (RLS) context
 - Handles multiple content types (BOE, DOGA, Real Estate)
+- Shared schema validation with BOE Parser for consistent message format
 - Error handling with Dead Letter Queue (DLQ) for failed messages
 - Retry mechanism with exponential backoff for transient failures
 - Structured logging with Pino for enhanced observability
@@ -35,7 +36,7 @@ A Cloud Run service that processes notifications from various content processors
 The notification worker is a critical component in the NIFYA notification pipeline:
 
 1. **Message Reception**: Listens to the `notification-processor` PubSub subscription
-2. **Message Validation**: Validates incoming messages against a schema
+2. **Message Validation**: Validates incoming messages against shared schema with BOE Parser
 3. **Processor Selection**: Routes messages to the appropriate processor based on the `processor_type` field
 4. **RLS Context Management**: Sets PostgreSQL Row-Level Security context for database operations
 5. **Notification Creation**: Inserts notification records into the database with proper user context
@@ -43,6 +44,27 @@ The notification worker is a critical component in the NIFYA notification pipeli
 7. **Health Monitoring**: Provides HTTP endpoints for health checks and diagnostics
 
 ## 🆕 Recent Updates
+
+### April 15, 2025: Shared Schema Implementation
+
+We've implemented a shared schema approach with the BOE Parser to ensure consistent message formats and prevent validation errors:
+
+1. **Problems Addressed**:
+   - Mismatched message formats between BOE Parser and Notification Worker
+   - Validation errors when processing messages with undefined/null values
+   - Lack of consistent field requirements between services
+
+2. **Solutions**:
+   - Created a shared schema definition used by both services
+   - Added validation before publishing and when receiving messages
+   - Implemented normalization for backward compatibility
+   - Added detailed documentation on the schema requirements
+
+3. **Implementation Details**:
+   - Added `src/utils/schemas/pubsubMessages.js` with shared validation logic
+   - Enhanced the parser service to handle missing or invalid fields
+   - Added comprehensive schema documentation in `docs/PUBSUB_SCHEMA.md`
+   - Improved error handling and logging for validation failures
 
 ### April 5, 2025: Major Refactoring
 
@@ -208,12 +230,52 @@ The service logs detailed operational metrics that can be viewed in Cloud Loggin
 
 ## 💬 Message Format
 
-The notification worker processes PubSub messages following a standardized schema that is consistently implemented across all NIFYA services. This schema is defined in:
+The notification worker processes PubSub messages following a standardized schema that is shared with the BOE Parser. This schema is defined in:
 
-- [NIFYA PubSub Message Schema Documentation](/docs/pubsub-structure.md)
-- [BOE Message Schema (notification-worker/src/types/boe.js)](src/types/boe.js)
+- [NIFYA PubSub Message Schema Documentation](docs/PUBSUB_SCHEMA.md)
+- [Shared Schema Implementation](src/utils/schemas/pubsubMessages.js)
+- [Zod Schema for Additional Validation](src/types/parser.js)
 
-All content processors (BOE, DOGA, Real Estate) must implement this schema for compatibility. Here's an example BOE message:
+### Shared Schema Structure
+
+The shared schema enforces a consistent message structure:
+
+```javascript
+{
+  "trace_id": "string", // Unique identifier for tracing the request
+  "request": {
+    "subscription_id": "string", // REQUIRED: ID of the subscription (empty string if not available)
+    "user_id": "string", // REQUIRED: ID of the user (empty string if not available)
+    "texts": ["string"] // Array of prompts/search texts
+  },
+  "results": {
+    "boe_info": {
+      "publication_date": "string", // Publication date in YYYY-MM-DD format
+      "source_url": "string" // Source URL
+    },
+    "query_date": "string", // Query date in YYYY-MM-DD format
+    "results": [
+      {
+        "prompt": "string", // The prompt used for analysis
+        "matches": [], // Array of matches found
+        "metadata": {} // Metadata for this result
+      }
+    ]
+  },
+  "metadata": {
+    "processing_time_ms": number, // Processing time in milliseconds
+    "total_items_processed": number, // Total number of items processed
+    "status": "string" // Processing status
+  }
+}
+```
+
+The notification worker uses a multi-step validation process:
+1. First validates against the shared schema
+2. Then uses Zod schema for additional validation
+3. Attempts to normalize messages that don't match the exact schema
+
+All content processors (BOE, DOGA, Real Estate) should implement this schema for compatibility. Here's an example BOE message:
 
 ```json
 {
