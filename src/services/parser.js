@@ -77,7 +77,18 @@ async function validateAndNormalizeMessage(message, traceId) {
     const validationResult = MessageSchema.safeParse(message);
     
     if (validationResult.success) {
-      return validationResult.data;
+      const validatedMessage = validationResult.data;
+      
+      // Check for critical empty fields even if validation passed
+      if (!validatedMessage.request.user_id) {
+        logger.warn('Message passed validation but has empty user_id', { trace_id: traceId });
+      }
+      
+      if (!validatedMessage.request.subscription_id) {
+        logger.warn('Message passed validation but has empty subscription_id', { trace_id: traceId });
+      }
+      
+      return validatedMessage;
     }
     
     // If validation fails, attempt to fix common issues
@@ -86,12 +97,28 @@ async function validateAndNormalizeMessage(message, traceId) {
       error_count: validationResult.error?.errors?.length || 0
     });
     
+    // Extract user_id and subscription_id from various possible locations
+    const user_id = message.request?.user_id || message.user_id || message.context?.user_id || 
+                   message.userId || message.context?.userId || "";
+    const subscription_id = message.request?.subscription_id || message.subscription_id || 
+                           message.context?.subscription_id || message.subscriptionId || 
+                           message.context?.subscriptionId || "";
+    
+    // Log warning if critical fields are empty
+    if (!user_id) {
+      logger.warn('Normalized message has empty user_id field', { trace_id: traceId });
+    }
+    
+    if (!subscription_id) {
+      logger.warn('Normalized message has empty subscription_id field', { trace_id: traceId });
+    }
+    
     // Create normalized message structure
     const normalizedMessage = {
       trace_id: traceId,
       request: {
-        user_id: message.request?.user_id || message.user_id || message.context?.user_id || "",
-        subscription_id: message.request?.subscription_id || message.subscription_id || message.context?.subscription_id || "",
+        user_id: user_id,
+        subscription_id: subscription_id,
         texts: message.request?.texts || message.request?.prompts || []
       },
       results: {
@@ -188,6 +215,17 @@ export async function createNotificationsFromMessage(message) {
     result_count: results.results.length
   });
   
+  // Validate required fields
+  if (!user_id) {
+    logger.error('Missing required user_id in request', { trace_id: traceId });
+    return { created: 0, errors: 1 };
+  }
+  
+  if (!subscription_id) {
+    logger.error('Missing required subscription_id in request', { trace_id: traceId });
+    return { created: 0, errors: 1 };
+  }
+  
   let notificationsCreated = 0;
   let errors = 0;
   
@@ -229,11 +267,15 @@ export async function createNotificationsFromMessage(message) {
         
         // Create the notification with RLS context
         await createNotification({
+          // Pass both camelCase and snake_case versions for maximum compatibility
           userId: user_id,
+          user_id: user_id,
           subscriptionId: subscription_id,
+          subscription_id: subscription_id,
           title: notificationTitle,
           content: match.summary || 'No summary provided',
           sourceUrl: match.links?.html || '',
+          source_url: match.links?.html || '',
           source: source,
           data: data,
           metadata: {

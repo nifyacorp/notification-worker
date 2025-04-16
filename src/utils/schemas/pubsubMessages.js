@@ -40,21 +40,49 @@ export function validateBoeParserMessage(message) {
   
   // Validate request object
   if (!message.request) throw new Error('Missing required field: request');
-  if (typeof message.request.subscription_id !== 'string') throw new Error('request.subscription_id must be a string');
-  if (typeof message.request.user_id !== 'string') throw new Error('request.user_id must be a string');
-  if (!Array.isArray(message.request.texts)) throw new Error('request.texts must be an array');
+  
+  // Check for string type but allow empty strings (will be validated and warned about elsewhere)
+  if (typeof message.request.subscription_id !== 'string') 
+    throw new Error('request.subscription_id must be a string');
+  
+  if (typeof message.request.user_id !== 'string') 
+    throw new Error('request.user_id must be a string');
+  
+  // Check for critical empty fields but don't throw - just warn in logs
+  if (message.request.user_id === '') 
+    console.warn(`WARNING: Empty user_id in message ${message.trace_id}`);
+  
+  if (message.request.subscription_id === '') 
+    console.warn(`WARNING: Empty subscription_id in message ${message.trace_id}`);
+  
+  // Allow texts to be undefined (will default to empty array in normalization)
+  if (message.request.texts !== undefined && !Array.isArray(message.request.texts)) 
+    throw new Error('request.texts must be an array');
   
   // Validate results object
   if (!message.results) throw new Error('Missing required field: results');
-  if (!message.results.boe_info) throw new Error('Missing required field: results.boe_info');
-  if (!message.results.query_date) throw new Error('Missing required field: results.query_date');
-  if (!Array.isArray(message.results.results)) throw new Error('results.results must be an array');
   
-  // Validate metadata object
-  if (!message.metadata) throw new Error('Missing required field: metadata');
-  if (typeof message.metadata.processing_time_ms !== 'number') throw new Error('metadata.processing_time_ms must be a number');
-  if (typeof message.metadata.total_items_processed !== 'number') throw new Error('metadata.total_items_processed must be a number');
-  if (typeof message.metadata.status !== 'string') throw new Error('metadata.status must be a string');
+  // Make boe_info optional - it will be created in normalization if missing
+  if (message.results.boe_info && typeof message.results.boe_info !== 'object') 
+    throw new Error('results.boe_info must be an object');
+  
+  if (!message.results.query_date) throw new Error('Missing required field: results.query_date');
+  
+  // Make results array optional - empty array will be created in normalization if missing
+  if (message.results.results !== undefined && !Array.isArray(message.results.results)) 
+    throw new Error('results.results must be an array');
+  
+  // Validate metadata object - make it optional with defaults
+  if (message.metadata) {
+    if (message.metadata.processing_time_ms !== undefined && typeof message.metadata.processing_time_ms !== 'number') 
+      throw new Error('metadata.processing_time_ms must be a number');
+    
+    if (message.metadata.total_items_processed !== undefined && typeof message.metadata.total_items_processed !== 'number') 
+      throw new Error('metadata.total_items_processed must be a number');
+    
+    if (message.metadata.status !== undefined && typeof message.metadata.status !== 'string') 
+      throw new Error('metadata.status must be a string');
+  }
   
   return true;
 }

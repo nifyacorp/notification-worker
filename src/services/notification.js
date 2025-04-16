@@ -122,23 +122,28 @@ async function publishEmailNotification(notification, email, immediate) {
 export async function createNotification(data) {
   try {
     const { 
-      userId, 
-      subscriptionId, 
+      userId, user_id,
+      subscriptionId, subscription_id,
       title, 
       content, 
-      sourceUrl = '', 
+      sourceUrl = '', source_url = '',
       source = null,
       data: notificationData = {},
       metadata = {}, 
       entity_type = 'notification:generic' 
     } = data;
     
-    if (!userId || !subscriptionId) {
+    // Support both camelCase and snake_case parameter names
+    const effectiveUserId = userId || user_id;
+    const effectiveSubscriptionId = subscriptionId || subscription_id;
+    const effectiveSourceUrl = sourceUrl || source_url;
+    
+    if (!effectiveUserId || !effectiveSubscriptionId) {
       throw new Error('Missing required fields: userId and subscriptionId');
     }
     
     // Use the withRLSContext method to handle the transaction with proper RLS context
-    const result = await database.withRLSContext(userId, async (client) => {
+    const result = await database.withRLSContext(effectiveUserId, async (client) => {
       const insertResult = await client.query(
         `INSERT INTO notifications (
           user_id,
@@ -155,11 +160,11 @@ export async function createNotification(data) {
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         RETURNING id`,
         [
-          userId,
-          subscriptionId,
+          effectiveUserId,
+          effectiveSubscriptionId,
           title || 'Notification',
           content || '',
-          sourceUrl,
+          effectiveSourceUrl,
           source,
           JSON.stringify(notificationData),
           JSON.stringify(metadata),
@@ -172,8 +177,8 @@ export async function createNotification(data) {
     });
     
     logger.info('Created notification with RLS context', {
-      user_id: userId,
-      subscription_id: subscriptionId,
+      user_id: effectiveUserId,
+      subscription_id: effectiveSubscriptionId,
       notification_id: result.rows[0]?.id,
       entity_type,
       source
@@ -181,30 +186,30 @@ export async function createNotification(data) {
     
     const notification = {
       id: result.rows[0]?.id,
-      userId,
-      subscriptionId,
+      userId: effectiveUserId,
+      subscriptionId: effectiveSubscriptionId,
       title,
       content,
-      sourceUrl,
+      sourceUrl: effectiveSourceUrl,
       source,
       entity_type,
       created_at: new Date().toISOString()
     };
 
     // Check if user should receive instant email notification
-    const { shouldSend, email } = await shouldSendInstantEmail(userId);
+    const { shouldSend, email } = await shouldSendInstantEmail(effectiveUserId);
     
     if (shouldSend && email) {
       // Get subscription name for better email context
       try {
-        const subResult = await database.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
+        const subResult = await database.query('SELECT name FROM subscriptions WHERE id = $1', [effectiveSubscriptionId]);
         if (subResult.rows.length > 0) {
           notification.subscriptionName = subResult.rows[0].name;
         }
       } catch (error) {
         logger.warn('Could not retrieve subscription name for email', {
           error: error.message,
-          subscription_id: subscriptionId
+          subscription_id: effectiveSubscriptionId
         });
       }
       
@@ -220,21 +225,21 @@ export async function createNotification(data) {
             email
           FROM users
           WHERE id = $1
-        `, [userId]);
+        `, [effectiveUserId]);
         
         if (userResult.rows.length > 0 && userResult.rows[0].email_notifications) {
           const userEmail = userResult.rows[0].notification_email || userResult.rows[0].email;
           if (userEmail) {
             // Get subscription name for better email context
             try {
-              const subResult = await database.query('SELECT name FROM subscriptions WHERE id = $1', [subscriptionId]);
+              const subResult = await database.query('SELECT name FROM subscriptions WHERE id = $1', [effectiveSubscriptionId]);
               if (subResult.rows.length > 0) {
                 notification.subscriptionName = subResult.rows[0].name;
               }
             } catch (error) {
               logger.warn('Could not retrieve subscription name for email', {
                 error: error.message,
-                subscription_id: subscriptionId
+                subscription_id: effectiveSubscriptionId
               });
             }
             
@@ -245,7 +250,7 @@ export async function createNotification(data) {
       } catch (error) {
         logger.error('Error checking user email notification preferences', {
           error: error.message,
-          user_id: userId
+          user_id: effectiveUserId
         });
       }
     }
@@ -255,14 +260,14 @@ export async function createNotification(data) {
       await triggerRealtimeNotification(notification);
       logger.info('Triggered realtime notification via WebSocket', {
         notification_id: notification.id,
-        user_id: userId
+        user_id: effectiveUserId
       });
     } catch (error) {
       // Non-blocking - we continue even if WebSocket notification fails
       logger.warn('Failed to trigger realtime notification', {
         error: error.message,
         notification_id: notification.id,
-        user_id: userId
+        user_id: effectiveUserId
       });
     }
 
@@ -271,7 +276,7 @@ export async function createNotification(data) {
     logger.error('Failed to create notification', {
       error: error.message,
       code: error.code,
-      user_id: data.userId
+      user_id: data.userId || data.user_id
     });
     throw error;
   }
