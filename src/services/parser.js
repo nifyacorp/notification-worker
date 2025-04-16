@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { MessageSchema } from '../types/parser.js';
 import { createNotification } from './notification.js';
 import { database } from './database.js';
+import { validateBoeParserMessage } from '../utils/schemas/pubsubMessages.js';
 
 /**
  * Validates and processes a PubSub message from any source
@@ -57,7 +58,22 @@ async function validateAndNormalizeMessage(message, traceId) {
       message.trace_id = traceId;
     }
     
-    // Try to validate against schema
+    // First, try to validate with the shared schema that matches the BOE parser
+    try {
+      validateBoeParserMessage(message);
+      // If validation passes with the shared schema, proceed to Zod validation
+      logger.info('Message validated successfully with shared schema', {
+        trace_id: traceId
+      });
+    } catch (sharedSchemaError) {
+      // Log the shared schema validation failure but continue with normalization
+      logger.warn('Shared schema validation failed, will attempt normalization', {
+        trace_id: traceId,
+        error: sharedSchemaError.message
+      });
+    }
+    
+    // Try to validate against Zod schema
     const validationResult = MessageSchema.safeParse(message);
     
     if (validationResult.success) {
@@ -74,16 +90,28 @@ async function validateAndNormalizeMessage(message, traceId) {
     const normalizedMessage = {
       trace_id: traceId,
       request: {
-        user_id: message.request?.user_id || message.user_id || message.context?.user_id,
-        subscription_id: message.request?.subscription_id || message.subscription_id || message.context?.subscription_id,
+        user_id: message.request?.user_id || message.user_id || message.context?.user_id || "",
+        subscription_id: message.request?.subscription_id || message.subscription_id || message.context?.subscription_id || "",
         texts: message.request?.texts || message.request?.prompts || []
       },
       results: {
         query_date: message.results?.query_date || new Date().toISOString().split('T')[0],
         results: []
       },
-      metadata: message.metadata || {}
+      metadata: message.metadata || {
+        processing_time_ms: 0,
+        total_items_processed: 0,
+        status: 'success'
+      }
     };
+    
+    // Ensure boe_info is present even if empty
+    if (!normalizedMessage.results.boe_info) {
+      normalizedMessage.results.boe_info = {
+        publication_date: normalizedMessage.results.query_date,
+        source_url: ''
+      };
+    }
     
     // Attempt to normalize results structure
     if (Array.isArray(message.results?.results)) {
@@ -102,7 +130,21 @@ async function validateAndNormalizeMessage(message, traceId) {
       normalizedMessage.results.boe_info = message.results.boe_info;
     }
     
-    // Validate the normalized message
+    // First try to validate with the shared schema
+    try {
+      validateBoeParserMessage(normalizedMessage);
+      logger.info('Normalized message validated successfully with shared schema', {
+        trace_id: traceId
+      });
+    } catch (normalizedSharedSchemaError) {
+      logger.warn('Normalized message failed shared schema validation', {
+        trace_id: traceId,
+        error: normalizedSharedSchemaError.message
+      });
+      // Continue to try Zod validation
+    }
+    
+    // Validate the normalized message with Zod
     const revalidationResult = MessageSchema.safeParse(normalizedMessage);
     
     if (revalidationResult.success) {
