@@ -34,6 +34,16 @@ export async function processMessage(message) {
       errors: result.errors
     });
     
+    // Mark as successfully processed
+    if (validatedMessage.request.subscription_id) {
+      logger.info('Successfully processed message', {
+        trace_id: traceId,
+        subscription_id: validatedMessage.request.subscription_id,
+        user_id: validatedMessage.request.user_id,
+        processing_status: 'completed'
+      });
+    }
+    
     return result;
   } catch (error) {
     logger.error('Failed to process message', {
@@ -212,7 +222,7 @@ export async function createNotificationsFromMessage(message) {
     subscription_id,
     user_id,
     query_date: results.query_date,
-    result_count: results.results.length
+    result_count: results.results?.length || 0
   });
   
   // Validate required fields
@@ -230,7 +240,7 @@ export async function createNotificationsFromMessage(message) {
   let errors = 0;
   
   // Process each query result
-  for (const queryResult of results.results) {
+  for (const queryResult of results.results || []) {
     const prompt = queryResult.prompt || 'Default prompt';
     
     // Skip if no matches
@@ -300,39 +310,6 @@ export async function createNotificationsFromMessage(message) {
         });
         errors++;
       }
-    }
-  }
-  
-  // If we successfully created notifications, remove the subscription processing record
-  if (notificationsCreated > 0 && subscription_id) {
-    try {
-      // Delete completed subscription_processing record
-      const deleteResult = await database.query(
-        `DELETE FROM subscription_processing 
-         WHERE subscription_id = $1 
-         RETURNING id`,
-        [subscription_id]
-      );
-      
-      if (deleteResult.rowCount > 0) {
-        logger.info('Deleted subscription processing record after completion', {
-          trace_id: traceId,
-          subscription_id,
-          deleted_count: deleteResult.rowCount
-        });
-      } else {
-        logger.info('No subscription processing record found to delete', {
-          trace_id: traceId,
-          subscription_id
-        });
-      }
-    } catch (error) {
-      logger.warn('Failed to delete subscription processing record', {
-        error: error.message,
-        trace_id: traceId,
-        subscription_id
-      });
-      // Don't count this as an error that affects the overall result
     }
   }
   
