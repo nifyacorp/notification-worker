@@ -1,5 +1,5 @@
 import { logger } from '../utils/logger.js';
-import { connectionState } from './database.js';
+import { connectionState } from '../database/client.js';
 import { pubsubState } from './pubsub/client.js';
 import { processorMetrics } from './pubsub/processor.js';
 
